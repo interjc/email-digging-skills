@@ -25,4 +25,18 @@ Back to the [board](README.md). Append new decisions at the end. Never rewrite o
   without silent rewrites.
 - Rejected options: auto-accept high-confidence suggestions (would relax data rule 5).
 - Overturn if: the user asks for auto-apply.
-- Status: planned (waiting for the Grok open-source research report)
+- Research (Grok, 2026-11-26): no library implements this rule. mailcheck on npm is the 2015 release, and the
+  forks (@zootools/email-spell-checker, email-misspelled) use loose distance-2 matching with Western provider
+  lists. deep-email-validator turns DNS timeouts into "no MX". Plan: our own module with no dependency, using
+  `node:dns/promises` `Resolver` (timeout and tries set; host resolver, never a public one). It classifies each
+  domain as accepts / refuses / unknown per RFC 5321 §5.1 (MX, else A/AAAA) and RFC 7505 (null MX); ENOTFOUND
+  is refuses, ENODATA means try A/AAAA, a timeout or SERVFAIL is unknown. Only the domain is queried, deduped,
+  cached and concurrency-capped, with no SMTP probes. A curated list of full provider domains includes
+  163/126/yeah.net/foxmail/sina.com/sina.cn/189.cn/139.com and docomo/ezweb/softbank.ne.jp.
+  "Obvious" = the typed domain refuses and is not on the list; exactly one provider is at Damerau-Levenshtein
+  distance 1 and is not distance 1 from another provider; that candidate accepts; the label count is equal;
+  and the differing label is at least 5 characters. Everything else is "ambiguous": distance 2, ties, a
+  typed domain that accepts mail, or any DNS failure. Traps to test: gmail.co, mail.com, 126.com vs 163.com,
+  sina.cn, q.com, yahoo.co.jp, a registered typo domain with its own MX. DNS lookups run only behind an
+  explicit flag, because they reveal the list's domains to the resolver.
+- Status: planned (design ready; implement next round when the user says go)
