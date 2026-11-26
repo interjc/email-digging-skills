@@ -8,7 +8,7 @@ import { stageSource } from './stage.ts';
 import { loadMeta } from './meta.ts';
 import { loadOverrides } from './overrides.ts';
 import { connect, ensureExtension, sqlStr } from './read/duck.ts';
-import { GB, SJIS, tmpDir, writeFile } from './read/testutil.ts';
+import { GB, SJIS, tmpDir, writeFile, writeXlsx } from './read/testutil.ts';
 
 const repo = path.resolve(import.meta.dirname, '..', '..');
 const NO_OVERRIDES: Overrides = { typo: [], suppressions: [], consents: [], exclude: [] };
@@ -394,7 +394,122 @@ test('R1-1 (D28): the "no email column" error masks an address found in a header
   // content sniff cannot rescue it (no '@' in the data), so staging must fail
   await assert.rejects(stageSource(meta, { stagingDir: tmpDir(), overrides: NO_OVERRIDES }), (err: Error) => {
     assert.doesNotMatch(err.message, /hanako\.yamada@example\.jp/);
-    assert.match(err.message, /h\*\*\*@e\*\*\*e\.jp/);
+    assert.match(err.message, /Headers seen: "<col 1>", "<col 2>"/);
     return true;
   });
+});
+
+// ---------------------------------------------------------------------------
+// Review R2 rework
+// ---------------------------------------------------------------------------
+
+type FsPatch = { [K in 'renameSync' | 'openSync']?: unknown };
+
+/** Replace functions of the (shared) fs module for the duration of `fn`. */
+async function withFsPatch<T>(patch: FsPatch, fn: () => Promise<T>): Promise<T> {
+  const original: FsPatch = {};
+  for (const k of Object.keys(patch) as Array<keyof FsPatch>) {
+    original[k] = (fs as unknown as FsPatch)[k];
+    (fs as unknown as FsPatch)[k] = patch[k];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(original) as Array<keyof FsPatch>) (fs as unknown as FsPatch)[k] = original[k];
+  }
+}
+
+test('R2-4: publication never deletes the live directory first; a failed swap puts the old one back', async () => {
+  const dir = sourceDir('shop-a');
+  writeFile(dir, 'a.csv', 'email\na@example.com\n');
+  const staging = tmpDir();
+  const first = await stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES });
+  writeFile(dir, 'a.csv', 'email\na@example.com\nb@example.com\n');
+
+  const realRename = fs.renameSync;
+  const seen: string[] = [];
+  const failing = ((from: fs.PathLike, to: fs.PathLike) => {
+    seen.push(`${path.basename(String(from)).split('-')[0]}→${path.basename(String(to))}`);
+    // the second rename (new → live) fails
+    if (path.basename(String(from)).startsWith('_tmp-') && path.basename(String(to)) === 'shop-a') {
+      throw Object.assign(new Error('EACCES: simulated'), { code: 'EACCES' });
+    }
+    return realRename(from, to);
+  }) as typeof fs.renameSync;
+  await withFsPatch({ renameSync: failing }, async () => {
+    await assert.rejects(stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES }), /EACCES/);
+  });
+  assert.ok(seen.includes('shop→_old') || seen.some((x) => x.endsWith('→shop-a')), seen.join(', '));
+  // the live directory is the previous, complete one; nothing else is left behind
+  assert.deepEqual(fs.readdirSync(staging), ['shop-a']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(first.dir, 'stats.json'), 'utf8')), first);
+  assert.equal((await parquet(path.join(first.dir, 'rows.parquet'))).length, 1);
+  // and the next run works
+  const again = await stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES });
+  assert.equal(again.staged_rows, 2);
+  assert.deepEqual(fs.readdirSync(staging), ['shop-a']);
+});
+
+test('R2-4: the live directory is renamed away (not deleted) before the new one moves in', async () => {
+  const dir = sourceDir('shop-a');
+  writeFile(dir, 'a.csv', 'email\na@example.com\n');
+  const staging = tmpDir();
+  await stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES });
+  const realRename = fs.renameSync;
+  const order: string[] = [];
+  const spy = ((from: fs.PathLike, to: fs.PathLike) => {
+    const f = path.basename(String(from));
+    const t = path.basename(String(to));
+    if (f === 'shop-a' && t.startsWith('_old-shop-a-')) order.push('live→old');
+    if (f.startsWith('_tmp-') && t === 'shop-a') order.push(`new→live (live exists: ${fs.existsSync(path.join(staging, 'shop-a'))})`);
+    return realRename(from, to);
+  }) as typeof fs.renameSync;
+  await withFsPatch({ renameSync: spy }, () => stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES }));
+  assert.deepEqual(order, ['live→old', 'new→live (live exists: false)']);
+  assert.deepEqual(fs.readdirSync(staging), ['shop-a']);
+});
+
+test('R2-4: a failure opening the second temp file leaves no temp directory', async () => {
+  const dir = sourceDir('shop-a');
+  writeFile(dir, 'a.csv', 'email\na@example.com\n');
+  const staging = tmpDir();
+  const realOpen = fs.openSync;
+  const failing = ((p: fs.PathLike, ...rest: unknown[]) => {
+    if (String(p).endsWith('_rejected.ndjson')) throw Object.assign(new Error('EMFILE: simulated'), { code: 'EMFILE' });
+    return (realOpen as (...a: unknown[]) => number)(p, ...rest);
+  }) as typeof fs.openSync;
+  await withFsPatch({ openSync: failing }, async () => {
+    await assert.rejects(stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES }), /EMFILE/);
+  });
+  assert.deepEqual(fs.readdirSync(staging), []);
+});
+
+test('R2-1c: an error that names a missing input file masks an address in its name', async () => {
+  const dir = sourceDir('shop-a');
+  const meta = makeMeta(dir, { files: [{ name: 'leak.person@example.com.csv', encoding: 'auto' }] }); // email-scan:allow
+  await assert.rejects(stageSource(meta, { stagingDir: tmpDir(), overrides: NO_OVERRIDES }), (err: Error) => {
+    assert.doesNotMatch(err.message, /leak\.person@example\.com/);
+    assert.doesNotMatch(err.message, /person@|leak\.person/);
+    assert.match(err.message, /\*\*\*@e\*\*\*e\.com/);
+    return true;
+  });
+});
+
+test('R3-8: consent_raw keeps the original cell untrimmed; matching still uses the normalized value', async () => {
+  const dir = sourceDir();
+  writeFile(dir, 'a.csv', 'email,opt\na@example.com," yes "\nb@example.com,"　NO　"\nc@example.com,\n');
+  const meta = makeMeta(dir, { columns: { consent: 'opt' } });
+  const r = await stageSource(meta, { stagingDir: tmpDir(), overrides: NO_OVERRIDES });
+  const rows = await parquet(path.join(r.dir, 'rows.parquet'));
+  assert.deepEqual(rows.map((x) => [x.consent_raw, x.consent_status]), [[' yes ', 'granted'], ['　NO　', 'denied'], [null, 'unknown']]);
+});
+
+test('R2-3b (D29): stageSource passes xlsx "columns beyond ZZ" warnings to onWarning', async () => {
+  const dir = sourceDir('shop-a');
+  const header = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'email' : `c${i}`));
+  const data = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'a@example.com' : i === 701 ? 'x' : null));
+  await writeXlsx(path.join(dir, 'wide.xlsx'), [header, data]);
+  const warnings: string[] = [];
+  await stageSource(makeMeta(dir, { files: [{ name: 'wide.xlsx', encoding: 'auto' }] }), { stagingDir: tmpDir(), overrides: NO_OVERRIDES, onWarning: (m) => warnings.push(m) });
+  assert.deepEqual(warnings, ['wide.xlsx: columns beyond ZZ are not read']);
 });

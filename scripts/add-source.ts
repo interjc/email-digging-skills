@@ -9,7 +9,7 @@ import type { ColumnMapping, FileProbe, MetaFile, SourceMeta, StandardField } fr
 import { EXIT } from './lib/types.ts';
 import { PreconditionError } from './lib/errors.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
-import { requireWorkspace, workspaceLayout } from './lib/paths.ts';
+import { assertPathSafe, requireWorkspace, workspaceLayout } from './lib/paths.ts';
 import { loadMeta, listSourceDir, renderMetaDraft, SOURCE_NAME_RE } from './lib/meta.ts';
 import type { DraftFile } from './lib/meta.ts';
 import { probeFile, readRows } from './lib/read/index.ts';
@@ -17,6 +17,7 @@ import { findDuplicates } from './lib/read/duplicates.ts';
 import { REVIEW_THRESHOLD } from './lib/read/synonyms.ts';
 import { maskValue } from './lib/mask.ts';
 import { sanitizeError, sanitizeText } from './lib/sanitize.ts';
+import { headerHasAddress, printableHeaders } from './lib/read/headers.ts';
 import { withWorkspaceLock } from './lib/lock.ts';
 import { makeConsentMatcher } from './lib/read/consent.ts';
 import type { ConsentMatcher } from './lib/read/consent.ts';
@@ -79,12 +80,6 @@ function displaySample(field: StandardField, value: string, consent: ConsentMatc
   return sanitizeText(shown);
 }
 
-/** Header text for output: sanitized and shortened (a mistaken header row can hold a whole record). */
-function displayHeader(h: string): string {
-  const clean = sanitizeText(h);
-  return clean.length > 60 ? `${clean.slice(0, 57)}...` : clean;
-}
-
 async function maskedSamples(file: string, meta: MetaFile, probe: FileProbe, consent: ConsentMatcher, decodedDir: string): Promise<Record<string, string[]>> {
   const mapped = probe.mappings.filter((m): m is ColumnMapping & { column: string } => m.column !== null);
   const out: Record<string, string[]> = Object.fromEntries(mapped.map((m) => [m.field, []]));
@@ -100,12 +95,13 @@ async function maskedSamples(file: string, meta: MetaFile, probe: FileProbe, con
   return out;
 }
 
-/** Copy of a probe that is safe to print: headers and mapped column names sanitized. */
+/** Copy of a probe that is safe to print: headers and mapped column names sanitized (or `<col N>`, see printableHeaders). */
 function printableProbe(p: FileProbe): FileProbe {
+  const headers = printableHeaders(p.headers);
   return {
     ...p,
-    headers: p.headers.map(displayHeader),
-    mappings: p.mappings.map((m) => ({ ...m, column: m.column === null ? null : displayHeader(m.column) })),
+    headers,
+    mappings: p.mappings.map((m) => ({ ...m, column: m.column === null ? null : (headers[p.headers.indexOf(m.column)] ?? '<col ?>') })),
   };
 }
 
@@ -133,6 +129,9 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
     return report;
   }
 
+  // R2-2: a source directory that is really a symlink into the checkout would get meta.md written
+  // inside the repository. assertPathSafe resolves the real path and refuses anything git could commit.
+  assertPathSafe(dir, { what: 'The source directory' });
   const listing = listSourceDir(dir);
   report.subdirs_ignored = listing.subdirs.map(sanitizeText);
   for (const d of listing.subdirs) report.warnings.push(sanitizeText(`subdirectory ignored: ${d}/`));
@@ -148,6 +147,12 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
     }
   }
 
+  // R2-5: files of an existing meta.md keep their order (and stay, even as accepted in-directory
+  // symlinks); files that are new follow, in name order.
+  const existingNames = existing ? existing.files.map((f) => f.name) : [];
+  const existingSet = new Set(existingNames);
+  const candidates = [...existingNames, ...listing.files.filter((n) => !existingSet.has(n))];
+
   // R1-7: decode into the workspace, never the OS temp dir; removed afterwards.
   const decodedDir = path.join(layout.staging, `_probe-${process.pid}`);
   fs.mkdirSync(decodedDir, { recursive: true });
@@ -155,15 +160,15 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
     const consent = makeConsentMatcher(existing?.consent_values);
     const probed: Array<{ name: string; path: string; meta: MetaFile; probe: FileProbe }> = [];
     const entries: AddSourceFileReport[] = []; // printable
-    for (const fileName of listing.files) {
+    for (const fileName of candidates) {
       const filePath = path.join(dir, fileName);
       const mf: MetaFile = existing?.files.find((f) => f.name === fileName) ?? { name: fileName, encoding: 'auto' };
       const entry: AddSourceFileReport = { file: sanitizeText(fileName), probe: null, error: null, duplicate_of: null, samples: {} };
       try {
-        const probe = await probeFile(filePath, mf, { columns: existing?.columns, decodedDir });
+        const probe = await probeFile(filePath, mf, { columns: existing?.columns, decodedDir, onWarning: (m) => report.warnings.push(m) });
         probed.push({ name: fileName, path: filePath, meta: mf, probe });
         entry.probe = printableProbe(probe);
-        if (probe.headers.some((h) => h.includes('@') || h.includes('＠'))) {
+        if (headerHasAddress(probe.headers)) {
           report.confirm.push(sanitizeText(`${fileName}: a header cell contains an address; the header row may be wrong (check header_row)`));
         }
       } catch (err) {
@@ -173,7 +178,7 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
     }
     report.files = entries;
     const rawByName = new Map(probed.map((p) => [p.name, p]));
-    const nameOf = (i: number) => listing.files[i] as string;
+    const nameOf = (i: number) => candidates[i] as string;
 
     // R9: suspected duplicates.
     let duplicates = new Map<string, string>();
@@ -181,6 +186,17 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
       duplicates = await findDuplicates(probed, decodedDir);
     } catch (err) {
       report.warnings.push(`duplicate check failed: ${sanitizeText((err as Error).message)}`);
+    }
+    // A file listed in an existing meta.md is never a duplicate; a new copy of it is.
+    const groups = new Map<string, string[]>();
+    for (const n of candidates) {
+      const canon = duplicates.get(n) ?? (candidates.some((m) => duplicates.get(m) === n) ? n : null);
+      if (canon !== null) groups.set(canon, [...(groups.get(canon) ?? []), n]);
+    }
+    duplicates = new Map();
+    for (const members of groups.values()) {
+      const canonical = members.find((n) => existingSet.has(n)) ?? members[0] as string;
+      for (const n of members) if (n !== canonical && !existingSet.has(n)) duplicates.set(n, canonical);
     }
     entries.forEach((e, i) => { e.duplicate_of = duplicates.has(nameOf(i)) ? sanitizeText(duplicates.get(nameOf(i)) as string) : null; });
 
@@ -197,19 +213,19 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
     }
 
     // Draft (raw column names: it is a file inside the workspace; only printed text is sanitized).
-    const listedNames = listing.files.filter((n) => !duplicates.has(n));
+    const listedNames = candidates.filter((n) => !duplicates.has(n));
     const first = listedNames.map((n) => rawByName.get(n)).find((x) => x !== undefined);
     const dates = listedNames.map(guessExportDate).filter((d): d is string => d !== null).sort();
     const exportedAt = dates.length > 0 ? (dates[dates.length - 1] as string) : null;
     const render = (ex: SourceMeta | null): string => renderMetaDraft({
       source: name, kind: ex?.kind, existing: ex, exportedAt,
       mappings: first?.probe.mappings ?? [],
-      files: listing.files.map((n, i) => ({
+      files: candidates.map((n, i) => ({
         name: n, probe: rawByName.get(n)?.probe ?? null, error: entries[i]?.error ?? undefined,
         duplicateOf: duplicates.get(n), settings: ex?.files.find((f) => f.name === n),
       })),
     });
-    if (listing.files.length > 0) {
+    if (candidates.length > 0) {
       // R1-4: create meta.md exclusively; if it appeared meanwhile (or existed), the draft goes elsewhere.
       let wroteMeta = false;
       if (existing === null && !fs.existsSync(metaPath)) {
@@ -252,7 +268,7 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
         }
       }
     });
-    if (listing.files.length === 0) report.warnings.push('no data files found in the directory');
+    if (candidates.length === 0) report.warnings.push('no data files found in the directory');
     else {
       if (!existing) report.confirm.push('consent_basis (opt_in / transactional / unknown): written as unknown; set it from how the data was collected');
       if (exportedAt && !existing?.exported_at) report.confirm.push(`exported_at: guessed ${exportedAt} from a file name; confirm`);

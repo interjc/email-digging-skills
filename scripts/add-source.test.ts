@@ -216,7 +216,7 @@ test('R1-1 (D28): addresses planted in Newsletter, date, locale cells, headers, 
   assert.deepEqual(f.samples.created_at, ['(unparsed)', '2025/3/2', '2025/3/3']); // an address in a date column shows no value
   assert.deepEqual(f.samples.locale, ['(other)', 'ja', 'en-US']);
   assert.deepEqual(f.samples.consent, ['(other)', 'yes', '0']);
-  assert.ok(f.probe?.headers.some((h) => h.includes('h***@e***e.jp')));
+  assert.ok(f.probe?.headers.every((h, i) => h === `<col ${i + 1}>`)); // R2-1b: a header row holding an address prints no header text
   assert.match(report.confirm.join('\n'), /a header cell contains an address; the header row may be wrong/);
   // an unprobeable file name with an address is masked in the error line as well
   assert.match(report.files.map((x) => x.file).join('|'), /l\*\*\*@e\*\*\*e\.com\.xls/);
@@ -360,4 +360,100 @@ test('R1-9 (D26): add-source holds the workspace lock; a held lock stops it with
   const results = await Promise.allSettled([addSource('shop-a', { workspace: ws }), addSource('shop-a', { workspace: ws })]);
   assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
   assert.match(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason), /in use/);
+});
+
+// ---------------------------------------------------------------------------
+// Review R2 rework
+// ---------------------------------------------------------------------------
+
+test('R2-1b: a header row that contains an address prints every header as <col N>, in text and JSON', async () => {
+  const { ws, resources } = workspace();
+  writeFile(path.join(resources, 'shop-a'), 'a.csv', 'hanako.yamada@example.jp,Hanako Yamada,2025/1/1\nsecond@example.com,Jiro Sato,2025/1/2\n');
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.deepEqual(report.files[0]?.probe?.headers, ['<col 1>', '<col 2>', '<col 3>']);
+  assert.match(report.confirm.join('\n'), /a header cell contains an address; the header row may be wrong/);
+  for (const args of [[], ['--json']]) {
+    const out = spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws, ...args], { cwd: repo, encoding: 'utf8' });
+    assert.equal(out.status, 0, out.stderr);
+    assert.doesNotMatch(out.stdout + out.stderr, /hanako|Hanako Yamada|Jiro|second@|h\*\*\*@/);
+    assert.match(out.stdout, /<col 1>/);
+  }
+});
+
+test('R2-2: a source directory that is a symlink into the checkout is refused; nothing is written there', async () => {
+  const { ws, resources } = workspace();
+  const inside = path.join(repo, `.t6-symlink-test-${process.pid}`);
+  fs.mkdirSync(inside);
+  try {
+    fs.writeFileSync(path.join(inside, 'a.csv'), 'Email\na@example.com\n');
+    fs.symlinkSync(inside, path.join(resources, 'shop-a'));
+    await assert.rejects(addSource('shop-a', { workspace: ws }), (err: Error) => {
+      assert.equal(err.name, 'PreconditionError');
+      assert.match(err.message, /The source directory .* is inside the repository/);
+      return true;
+    });
+    assert.deepEqual(fs.readdirSync(inside), ['a.csv']); // no meta.md, no meta.draft.md
+    assert.equal(spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws], { cwd: repo, encoding: 'utf8' }).status, 2);
+  } finally {
+    fs.rmSync(inside, { recursive: true, force: true });
+  }
+});
+
+test('R2-5: the draft keeps an existing meta.md file order and in-directory symlinks; new files follow; "1e2" stays a string', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'zeta.csv', 'Email\nz@example.com\n');
+  writeFile(dir, 'real.csv', 'Email\nr@example.com\n');
+  fs.symlinkSync(path.join(dir, 'real.csv'), path.join(dir, 'alias.csv')); // accepted: stays inside the directory
+  await writeXlsx(path.join(dir, 'book.xlsx'), [['Email'], ['x@example.com']], '1e2');
+  writeFile(dir, 'a-new.csv', 'Email\nn@example.com\n');
+  writeFile(dir, 'b-new.csv', 'Email\nm@example.com\n');
+  fs.writeFileSync(path.join(dir, 'meta.md'), [
+    '---', 'source: shop-a', 'kind: other', 'files:',
+    '  - name: zeta.csv', '  - name: alias.csv', '  - name: book.xlsx', '    sheet: "1e2"', '  - name: real.csv',
+    '---', '',
+  ].join('\n'));
+
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.deepEqual(report.files.map((f) => [f.file, f.error]), [
+    ['zeta.csv', null], ['alias.csv', null], ['book.xlsx', null], ['real.csv', null], ['a-new.csv', null], ['b-new.csv', null],
+  ]);
+  // the symlink and its target have identical rows, but both are listed in the existing meta.md: not duplicates
+  assert.deepEqual(report.files.map((f) => f.duplicate_of), [null, null, null, null, null, null]);
+
+  fs.renameSync(path.join(dir, 'meta.draft.md'), path.join(dir, 'meta.md')); // use the draft as the meta.md
+  const meta = loadMeta(dir);
+  assert.deepEqual(meta.files.map((f) => f.name), ['zeta.csv', 'alias.csv', 'book.xlsx', 'real.csv', 'a-new.csv', 'b-new.csv']);
+  assert.equal(meta.files[2]?.sheet, '1e2');
+  assert.equal(typeof meta.files[2]?.sheet, 'string');
+});
+
+test('R2-5: a new file that copies a file listed in the existing meta.md is the suspected duplicate', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'members_2025-03-01.csv', 'Email,Name\na@example.com,A\n');
+  writeFile(dir, 'a copy.csv', 'Name,Email\nA,a@example.com\n'); // sorts before the listed name
+  fs.writeFileSync(path.join(dir, 'meta.md'), '---\nsource: shop-a\nkind: other\nfiles:\n  - name: members_2025-03-01.csv\n---\n');
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.deepEqual(report.files.map((f) => [f.file, f.duplicate_of]), [['members_2025-03-01.csv', null], ['a copy.csv', 'members_2025-03-01.csv']]);
+});
+
+test('R2-6 (D25): the draft of a plain UTF-8 file says `encoding: utf-8` with a detected note; no confirmation', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'a.csv', 'Email,Name\na@example.com,山田\n');
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.match(fs.readFileSync(path.join(dir, 'meta.md'), 'utf8'), /^ {2}encoding: utf-8 {3}# detected/m);
+  assert.equal(loadMeta(dir).files[0]?.encoding, 'utf-8');
+  assert.doesNotMatch(report.confirm.join('\n'), /encoding/);
+});
+
+test('R2-3b (D29): add-source reports xlsx columns beyond ZZ as a warning', async () => {
+  const { ws, resources } = workspace();
+  const header = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'Email' : `c${i}`));
+  const data = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'a@example.com' : i === 701 ? 'x' : null));
+  fs.mkdirSync(path.join(resources, 'shop-a'));
+  await writeXlsx(path.join(resources, 'shop-a', 'wide.xlsx'), [header, data]);
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.ok(report.warnings.includes('wide.xlsx: columns beyond ZZ are not read'), report.warnings.join(' | '));
 });

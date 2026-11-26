@@ -16,6 +16,8 @@ export interface OpenTable {
 export interface OpenTableOptions {
   /** For text formats: path of the UTF-8 copy (already decoded). Required for csv, tsv, json. */
   decodedPath?: string;
+  /** Non-fatal findings (for example xlsx columns that are not read). Messages may name the file: sanitize before printing. */
+  onWarning?: (message: string) => void;
 }
 
 export function formatOf(file: string): FileFormat {
@@ -51,15 +53,24 @@ async function* streamRows(conn: DuckDBConnection, sql: string): AsyncGenerator<
 }
 
 /**
- * Empty headers become `column<i>`; repeated ones get `_1`, `_2`... and every result is unique
- * (so `z`, `z`, `z_1` cannot produce a duplicate key).
+ * Literal header names are reserved first: the first occurrence of a name keeps it, an empty header
+ * becomes `column<i>`, and a repeated one gets the smallest `_<k>` that no literal header uses. So
+ * `z`, `z`, `z_1` give `z`, `z_2`, `z_1`, and a meta.md mapping to `z_1` keeps selecting the third column.
  */
 export function uniqueHeaders(raw: Array<string | null>): string[] {
+  const isLiteral = (h: string | null): h is string => h !== null && h.trim() !== '';
+  const literal = new Set(raw.filter(isLiteral));
   const used = new Set<string>();
   return raw.map((h, i) => {
-    const base = h === null || h.trim() === '' ? `column${i}` : h;
-    let name = base;
-    for (let k = 1; used.has(name); k++) name = `${base}_${k}`;
+    let name: string;
+    if (isLiteral(h) && !used.has(h)) {
+      name = h;
+    } else {
+      const base = isLiteral(h) ? h : `column${i}`;
+      name = base;
+      for (let k = 1; used.has(name) || (literal.has(name) && name !== h); k++) name = `${base}_${k}`;
+      // an empty header may take `column<i>` itself unless a literal header already uses that name
+    }
     used.add(name);
     return name;
   });
@@ -71,6 +82,9 @@ export function columnLetters(n: number): string {
   for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(65 + ((k - 1) % 26)) + s;
   return s;
 }
+
+/** Column ZZ: the width scan of an xlsx sheet stops here (D29). */
+const ZZ_COLUMNS = 702;
 
 export async function openTable(file: string, format: FileFormat, meta: MetaFile, opts: OpenTableOptions = {}): Promise<OpenTable> {
   const conn = await connect();
@@ -89,17 +103,18 @@ export async function openTable(file: string, format: FileFormat, meta: MetaFile
       const p = opts.decodedPath ?? file;
       const delim = meta.delimiter ?? (format === 'tsv' ? '\t' : null);
       const options = [
-        'header=true', 'all_varchar=true', 'null_padding=true', 'strict_mode=false',
+        'header=false', 'all_varchar=true', 'null_padding=true', 'strict_mode=false',
         'parallel=false', // keeps file order and allows null padding with quoted newlines
         `skip=${headerRow - 1}`,
         ...(delim ? [`delim=${sqlStr(delim)}`] : []),
       ].join(', ');
-      const result = await conn.stream(`SELECT * FROM read_csv(${sqlStr(p)}, ${options})`);
-      const headers = uniqueHeaders(result.columnNames());
-      async function* gen(): AsyncGenerator<Array<string | null>> {
-        for await (const chunk of result.yieldRows()) for (const row of chunk) yield row.map(cell);
-      }
-      return { headers, rows: gen(), close };
+      // header=false: the header row comes back as the first row, so the names are the file's own
+      // literal text and uniqueHeaders (not DuckDB's renaming) decides the keys.
+      const all = streamRows(conn, `SELECT * FROM read_csv(${sqlStr(p)}, ${options})`);
+      const first = await all.next();
+      if (first.done) return { headers: [], rows: all, close };
+      const headers = uniqueHeaders(first.value);
+      return { headers, rows: all, close };
     }
 
     if (format === 'xlsx') {
@@ -127,7 +142,13 @@ export async function openTable(file: string, format: FileFormat, meta: MetaFile
       // header is kept (it gets a `column<i>` name).
       let width = lastUsed(headerCells);
       const dataRange = (w: number) => `A${headerRow + 1}:${columnLetters(Math.max(w, 1))}${endRow}`;
-      for await (const row of streamRows(conn, read(`A${headerRow + 1}:ZZ${endRow}`))) width = Math.max(width, lastUsed(row));
+      let beyond = lastUsed(headerCells) > ZZ_COLUMNS;
+      for await (const row of streamRows(conn, read(`A${headerRow + 1}:ZZ${endRow}`))) {
+        width = Math.max(width, lastUsed(row));
+        if (width >= ZZ_COLUMNS) beyond = true; // column ZZ has data: there may be more to the right
+      }
+      width = Math.min(width, ZZ_COLUMNS);
+      if (beyond) opts.onWarning?.(`${path.basename(file)}: columns beyond ZZ are not read`);
       if (width === 0) return { headers: [], rows: (async function* () {})(), close };
       const headers = uniqueHeaders(Array.from({ length: width }, (_, i) => headerCells[i] ?? null));
       async function* gen(): AsyncGenerator<Array<string | null>> {

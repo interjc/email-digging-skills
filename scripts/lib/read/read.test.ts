@@ -271,3 +271,45 @@ test('headers (R1-2d): repeated headers z, z, z_1 give three distinct keys (xlsx
   assert.equal(new Set(c.probe.headers).size, 4);
   assert.deepEqual(Object.values(c.rows[0]!.cells).sort(), ['1', '2', '3', 'a@example.com']);
 });
+
+// ---------------------------------------------------------------------------
+// Review R2 rework
+// ---------------------------------------------------------------------------
+
+import { uniqueHeaders } from './table.ts';
+
+test('R2-3a: literal header names are reserved first (z, z, z_1 → z, z_2, z_1)', async () => {
+  assert.deepEqual(uniqueHeaders(['z', 'z', 'z_1']), ['z', 'z_2', 'z_1']);
+  assert.deepEqual(uniqueHeaders(['z', 'z', 'z']), ['z', 'z_1', 'z_2']);
+  assert.deepEqual(uniqueHeaders([null, 'column0', '']), ['column0_1', 'column0', 'column2']);
+  assert.deepEqual(uniqueHeaders(['a', null, 'column1']), ['a', 'column1_1', 'column1']);
+  const dir = tmpDir();
+  const csv = writeFile(dir, 'z.csv', 'z,z,z_1,email\n1,2,3,a@example.com\n');
+  const xlsx = path.join(dir, 'z.xlsx');
+  await writeXlsx(xlsx, [['z', 'z', 'z_1', 'email'], ['1', '2', '3', 'a@example.com']]);
+  for (const [file, name] of [[csv, 'z.csv'], [xlsx, 'z.xlsx']] as const) {
+    // an explicit mapping to `z_1` keeps selecting the third column
+    const { probe, rows } = await readAll(file, mf(name), { name: 'z_1' });
+    assert.deepEqual(probe.headers, ['z', 'z_2', 'z_1', 'email'], name);
+    assert.equal(probe.mappings.find((m) => m.field === 'name')?.column, 'z_1');
+    assert.deepEqual(rows[0]?.cells, { z: '1', z_2: '2', z_1: '3', email: 'a@example.com' }, name);
+  }
+});
+
+test('R2-3b (D29): xlsx data in column ZZ warns that columns beyond ZZ are not read', async () => {
+  const dir = tmpDir();
+  const wide = path.join(dir, 'wide.xlsx');
+  const header = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'email' : `c${i}`));
+  const data = Array.from({ length: 702 }, (_, i): string | null => (i === 0 ? 'a@example.com' : i === 701 ? 'at-zz' : null));
+  await writeXlsx(wide, [header, data]);
+  const warnings: string[] = [];
+  const probe = await probeFile(wide, mf('wide.xlsx'), { onWarning: (m) => warnings.push(m) });
+  assert.deepEqual(warnings, ['wide.xlsx: columns beyond ZZ are not read']);
+  assert.equal(probe.headers.length, 702);
+
+  const narrow = path.join(dir, 'narrow.xlsx');
+  await writeXlsx(narrow, [['email', 'name'], ['a@example.com', 'A']]);
+  const none: string[] = [];
+  await probeFile(narrow, mf('narrow.xlsx'), { onWarning: (m) => none.push(m) });
+  assert.deepEqual(none, []);
+});

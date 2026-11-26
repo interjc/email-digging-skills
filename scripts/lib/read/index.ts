@@ -22,6 +22,8 @@ export { decodeBytes } from './decode.ts';
 export interface ReadOptions {
   /** Directory for the UTF-8 copy of a decoded text file. Default: a temp directory removed afterwards. */
   decodedDir?: string;
+  /** Non-fatal findings, e.g. "columns beyond ZZ are not read" for xlsx. */
+  onWarning?: (message: string) => void;
 }
 
 export interface ProbeOptions extends ReadOptions {
@@ -82,7 +84,7 @@ async function probeFileUnsafe(file: string, metaFile: MetaFile | undefined, opt
   const prep = prepare(file, format, meta, opts);
   let table: OpenTable | null = null;
   try {
-    table = await openTable(file, format, meta, { decodedPath: prep.decodedPath });
+    table = await openTable(file, format, meta, { decodedPath: prep.decodedPath, onWarning: opts.onWarning ? (m) => opts.onWarning?.(sanitizeText(m)) : undefined });
     const headers = table.headers;
     if (headers.length === 0) throw new Error('no header row found (the file is empty, or header_row is past the end)');
     const samples: Array<Array<string | null>> = headers.map(() => []);

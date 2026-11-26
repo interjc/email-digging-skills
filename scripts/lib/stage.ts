@@ -13,11 +13,14 @@ import { connect, ensureExtension, sqlStr } from './read/duck.ts';
 import { probeFile, readRows } from './read/index.ts';
 import { SOURCE_NAME_RE } from './meta.ts';
 import { sanitizeText } from './sanitize.ts';
+import { printableHeaders } from './read/headers.ts';
 
 export interface StageOptions {
   /** `output/staging`; the source gets `<stagingDir>/<source>/`, removed and recreated. */
   stagingDir: string;
   overrides: Overrides;
+  /** Non-fatal findings (sanitized), e.g. xlsx columns beyond ZZ that are not read. */
+  onWarning?: (message: string) => void;
 }
 
 function sha256File(file: string): string {
@@ -147,21 +150,50 @@ async function writeParquet(ndjson: NdjsonWriter, columns: ReadonlyArray<readonl
   }
 }
 
-/** Swap `tmp` into `final`. Another stage of the same source may win the race; the last rename stands. */
-function replaceDir(tmp: string, final: string): void {
+/**
+ * Publish `tmp` as `final` without ever deleting the live directory first: live → `_old-…`, tmp → live,
+ * then remove old. If the second rename fails the old directory is put back. Another stage of the same
+ * source may publish in between; a non-empty target just means "go around again".
+ */
+function publishDir(tmp: string, final: string): void {
+  const root = path.dirname(final);
   for (let attempt = 0; ; attempt++) {
-    fs.rmSync(final, { recursive: true, force: true });
+    const old = path.join(root, `_old-${path.basename(final)}-${crypto.randomBytes(4).toString('hex')}`);
+    let moved = false;
+    try {
+      fs.renameSync(final, old);
+      moved = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
     try {
       fs.renameSync(tmp, final);
-      return;
     } catch (err) {
+      if (moved) {
+        try { fs.renameSync(old, final); } catch { /* someone else published; drop ours */ }
+        fs.rmSync(old, { recursive: true, force: true });
+      }
       const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= 20 || (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'EPERM')) throw err;
+      if (attempt < 20 && (code === 'ENOTEMPTY' || code === 'EEXIST')) continue;
+      throw err;
     }
+    if (moved) fs.rmSync(old, { recursive: true, force: true });
+    return;
   }
 }
 
+/** Errors can name input files (and DuckDB messages quote content): everything leaves sanitized (D28). */
 export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise<SourceStageResult> {
+  try {
+    return await stageSourceInner(meta, opts);
+  } catch (err) {
+    const clean = new Error(sanitizeText(err instanceof Error ? err.message : String(err)));
+    if (err instanceof Error) clean.name = err.name;
+    throw clean;
+  }
+}
+
+async function stageSourceInner(meta: SourceMeta, opts: StageOptions): Promise<SourceStageResult> {
   if (!SOURCE_NAME_RE.test(meta.source)) throw new Error(`invalid source name "${meta.source}"`);
   const stagingRoot = path.resolve(opts.stagingDir);
   const finalDir = path.join(stagingRoot, meta.source);
@@ -169,10 +201,9 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
   // reader (or a second stage of the same source) never sees a half-written directory. Source names
   // cannot start with `_`, so the temp name never collides with a source.
   const dir = path.join(stagingRoot, `_tmp-${meta.source}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-  fs.mkdirSync(dir, { recursive: true });
   const decodedDir = path.join(dir, '_decoded');
-  const rowsTmp = new NdjsonWriter(path.join(dir, '_rows.ndjson'));
-  const rejectTmp = new NdjsonWriter(path.join(dir, '_rejected.ndjson'));
+  let rowsTmp: NdjsonWriter | null = null;
+  let rejectTmp: NdjsonWriter | null = null;
 
   const idx = indexOverrides(opts.overrides);
   const consent = makeConsentMatcher(meta.consent_values);
@@ -180,14 +211,20 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
   const unique = new Set<string>();
 
   try {
+    // Created inside the try so a failure opening the second file still removes the temp directory.
+    fs.mkdirSync(dir, { recursive: true });
+    const rowsW = new NdjsonWriter(path.join(dir, '_rows.ndjson'));
+    rowsTmp = rowsW;
+    const rejectW = new NdjsonWriter(path.join(dir, '_rejected.ndjson'));
+    rejectTmp = rejectW;
     for (const mf of meta.files) {
       const filePath = path.join(meta.dir, mf.name);
       const sha256 = sha256File(filePath);
-      const probe = await probeFile(filePath, mf, { columns: meta.columns, decodedDir });
+      const probe = await probeFile(filePath, mf, { columns: meta.columns, decodedDir, onWarning: opts.onWarning });
       const col = (field: string): string | null => probe.mappings.find((m) => m.field === field)?.column ?? null;
       const emailCol = col('email');
       if (emailCol === null) {
-        throw new Error(sanitizeText(`${mf.name}: no email column found. Headers seen: ${probe.headers.map((h) => JSON.stringify(h)).join(', ')}. Set \`columns.email\` in meta.md.`));
+        throw new Error(sanitizeText(`${mf.name}: no email column found. Headers seen: ${printableHeaders(probe.headers).map((h) => JSON.stringify(h)).join(', ')}. Set \`columns.email\` in meta.md.`));
       }
       const nameCol = col('name');
       const localeCol = col('locale');
@@ -205,7 +242,9 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
         stats.rows_read++;
         const candidates = normalizeEmailCell(cells[emailCol]);
         if (candidates.length > 1) stats.cells_split++;
-        const consentRaw = consentCol ? trimOrNull(cells[consentCol]) : null;
+        // consent_raw is evidence: the original cell, untrimmed (matching normalizes by itself)
+        const rawConsentCell = consentCol ? (cells[consentCol] ?? null) : null;
+        const consentRaw = rawConsentCell === '' ? null : rawConsentCell;
         const common = {
           name: nameCol ? trimOrNull(cells[nameCol]) : null,
           locale: localeCol ? trimOrNull(cells[localeCol]) : null,
@@ -221,7 +260,7 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
             if (reason === 'empty') stats.empty++;
             else stats.invalid++;
             const rejected: RejectedRow = { source: meta.source, file: mf.name, row_number, raw_value: reason === 'empty' ? null : c.raw, reason };
-            rejectTmp.write(rejected);
+            rejectW.write(rejected);
             return;
           }
           const excluded = (email: string) => idx.excludeEmails.has(email) || idx.excludePatterns.some((re) => re.test(email));
@@ -229,7 +268,7 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
           // D22: an exclusion matches the address before or after an accepted typo correction.
           if (excluded(c.email) || excluded(fin.email)) {
             const rejected: RejectedRow = { source: meta.source, file: mf.name, row_number, raw_value: c.raw, reason: 'excluded_by_override' };
-            rejectTmp.write(rejected);
+            rejectW.write(rejected);
             return;
           }
           const domain = fin.email.slice(fin.email.lastIndexOf('@') + 1);
@@ -245,33 +284,33 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
             ...common,
             raw_fields: cells,
           };
-          rowsTmp.write({ ...row, raw_fields: JSON.stringify(cells) });
+          rowsW.write({ ...row, raw_fields: JSON.stringify(cells) });
         });
       }
       fileStats.push(stats);
     }
-    rowsTmp.close();
-    rejectTmp.close();
+    rowsW.close();
+    rejectW.close();
 
-    await writeParquet(rowsTmp, ROW_COLUMNS, path.join(dir, 'rows.parquet'));
-    await writeParquet(rejectTmp, REJECT_COLUMNS, path.join(dir, 'rejected.parquet'));
+    await writeParquet(rowsW, ROW_COLUMNS, path.join(dir, 'rows.parquet'));
+    await writeParquet(rejectW, REJECT_COLUMNS, path.join(dir, 'rejected.parquet'));
 
     const result: SourceStageResult = {
       source: meta.source,
       files: fileStats,
-      staged_rows: rowsTmp.count,
-      rejected_rows: rejectTmp.count,
+      staged_rows: rowsW.count,
+      rejected_rows: rejectW.count,
       unique_emails: unique.size,
       dir: finalDir,
     };
     fs.writeFileSync(path.join(dir, 'stats.json'), JSON.stringify(result, null, 2) + '\n');
     fs.rmSync(decodedDir, { recursive: true, force: true });
-    fs.rmSync(rowsTmp.file, { force: true });
-    fs.rmSync(rejectTmp.file, { force: true });
-    replaceDir(dir, finalDir);
+    fs.rmSync(rowsW.file, { force: true });
+    fs.rmSync(rejectW.file, { force: true });
+    publishDir(dir, finalDir);
     return result;
   } finally {
-    for (const w of [rowsTmp, rejectTmp]) { try { w.close(); } catch { /* already closed */ } }
+    for (const w of [rowsTmp, rejectTmp]) { try { w?.close(); } catch { /* already closed */ } }
     fs.rmSync(dir, { recursive: true, force: true }); // no-op after a successful rename
   }
 }

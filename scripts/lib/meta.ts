@@ -2,14 +2,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import type {
   ColumnMapping, ConsentBasis, DeclaredEncoding, FileProbe, MetaFile, SourceKind, SourceMeta, StandardField,
 } from './types.ts';
 import { STANDARD_FIELDS } from './types.ts';
 import { byNameStem } from './read/order.ts';
 import { normalizeConsentToken } from './read/consent.ts';
-import { describeYamlError, sanitizeText } from './sanitize.ts';
+import { sanitizeText } from './sanitize.ts';
 
 export const SOURCE_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const KINDS: SourceKind[] = ['product', 'event', 'other'];
@@ -130,15 +130,20 @@ export function loadMeta(dir: string, onWarning?: (message: string) => void): So
   const errors: string[] = [];
   const front = splitFrontmatter(fs.readFileSync(metaPath, 'utf8'));
   if (front === null) throw new MetaError(abs, ['meta.md must start with a YAML frontmatter block between two `---` lines']);
-  let doc: unknown;
-  try {
-    doc = parseYaml(front);
-  } catch (err) {
-    throw new MetaError(abs, [`frontmatter is not valid YAML (${describeYamlError(err)})`]);
+  // parseDocument (not parse): the yaml library's own messages quote the source line, and its
+  // warnings (TAG_RESOLVE_FAILED...) go to the console. Only code and position are kept (D28).
+  const yamlDoc = parseDocument(front, { logLevel: 'silent' });
+  const yamlWarnings: string[] = [];
+  const where = (e: { code: string; linePos?: Array<{ line: number; col: number }> }): string =>
+    `${e.code}${e.linePos?.[0] ? ` at line ${e.linePos[0].line + 1}, column ${e.linePos[0].col}` : ''}`; // +1: the opening `---`
+  for (const w of yamlDoc.warnings) yamlWarnings.push(`meta.md: YAML warning ${where(w)}`);
+  if (yamlDoc.errors.length > 0) {
+    throw new MetaError(abs, yamlDoc.errors.slice(0, 5).map((e) => `meta.md: frontmatter is not valid YAML (${where(e)})`));
   }
+  const doc: unknown = yamlDoc.toJS();
   if (!isObj(doc)) throw new MetaError(abs, ['frontmatter must be a YAML mapping']);
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...yamlWarnings];
   for (const k of Object.keys(doc)) {
     if (!TOP_KEYS.includes(k)) warnings.push(`meta.md: unknown key "${k}" ignored`);
   }
@@ -267,11 +272,10 @@ export function loadMeta(dir: string, onWarning?: (message: string) => void): So
 // Draft rendering (add-source)
 // ---------------------------------------------------------------------------
 
+/** A string scalar as YAML text. The yaml library quotes whatever would be retyped ("1e2", "true", "2025-01-01"). */
 function y(v: string): string {
-  // Quote only when YAML needs it.
-  return /^[\p{L}\p{N}][\p{L}\p{N} ._/()\-+]*$/u.test(v) && !/^(true|false|null|yes|no|on|off|~|\d+(\.\d+)?)$/i.test(v) && !/ $/.test(v)
-    ? v
-    : JSON.stringify(v);
+  if (/[\n\r]/.test(v)) return JSON.stringify(v);
+  return stringifyYaml(v, { lineWidth: 0 }).trim();
 }
 
 export interface DraftFile {
@@ -307,6 +311,8 @@ export function renderMetaDraft(input: DraftInput): string {
     const st = f.settings;
     if (st && st.encoding !== 'auto') {
       lines.push(`  encoding: ${st.encoding}`);
+    } else if (p && p.encodingHow === 'detected' && p.encoding === 'utf-8' && p.encodingCandidates.length <= 1) {
+      lines.push('  encoding: utf-8   # detected (valid UTF-8; nothing to confirm)'); // D25
     } else {
       const detail = p && p.encodingHow === 'detected' && p.encoding !== null
         ? `  # detected ${p.encoding}${p.encodingCandidates.length > 1 ? ` (candidates: ${p.encodingCandidates.join(', ')})` : ''}; confirm, then write it here`

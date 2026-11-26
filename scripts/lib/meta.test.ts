@@ -253,3 +253,68 @@ test('R1-1 (D28): YAML errors and invalid values never echo an address', () => {
   assert.ok(warnings.length > 0);
   assert.ok(warnings.every((w) => !/x@example\.org/.test(w)));
 });
+
+// ---------------------------------------------------------------------------
+// Review R2 rework
+// ---------------------------------------------------------------------------
+
+test('R2-1a: YAML errors and warnings (TAG_RESOLVE_FAILED) give code and position only', () => {
+  const emitted: string[] = [];
+  const onWarn = (w: Error) => emitted.push(w.message);
+  process.on('warning', onWarn);
+  try {
+    // an unresolved tag carrying an address: the yaml library warns and quotes the source text
+    const dir = source('shop-a', 'source: shop-a\nkind: other\nnote: !secret.person@example.com value\nfiles:\n  - name: a.csv');
+    const warnings: string[] = [];
+    loadMeta(dir, (w) => warnings.push(w));
+    const yamlWarning = warnings.find((w) => /YAML warning/.test(w));
+    assert.ok(yamlWarning, warnings.join(' | '));
+    assert.match(yamlWarning!, /^meta\.md: YAML warning TAG_RESOLVE_FAILED at line 4, column \d+$/);
+    assert.doesNotMatch(warnings.join('\n'), /secret\.person|@example/);
+
+    const bad = path.join(tmpDir(), 'shop-b');
+    fs.mkdirSync(bad);
+    fs.writeFileSync(path.join(bad, 'meta.md'), '---\nsource: shop-b\nnote: [secret.person@example.com\nkind: other\n---\n');
+    assert.throws(() => loadMeta(bad), (err: Error) => {
+      assert.match(err.message, /meta\.md: frontmatter is not valid YAML \([A-Z_]+ at line \d+, column \d+\)/);
+      assert.doesNotMatch(err.message, /secret\.person|@example/);
+      return true;
+    });
+  } finally {
+    process.off('warning', onWarn);
+  }
+  assert.deepEqual(emitted.filter((m) => /secret\.person|@example/.test(m)), []); // nothing reached the process warnings either
+});
+
+test('R2-1c: errors that name a file mask an address in the file name', () => {
+  const dir = source('shop-a', 'source: shop-a\nkind: other\nfiles:\n  - name: leak.person@example.com.csv'); // email-scan:allow
+  const e = errorsOf(dir).join('\n');
+  assert.doesNotMatch(e, /leak\.person@example\.com/);
+  assert.match(e, /does not exist/);
+});
+
+test('R2-5: string scalars of a draft are quoted by the yaml library so they stay strings', () => {
+  const draft = renderMetaDraft({
+    source: 'shop-a', exportedAt: null, mappings: [{ field: 'email', column: null, how: 'none', confidence: 0 }],
+    existing: { source: 'shop-a', kind: 'other', label: '1e2', files: [], columns: { email: 'yes' }, consent_basis: 'unknown', exported_at: null, dir: '/x' },
+    files: [{ name: 'b.xlsx', probe: null, settings: { name: 'b.xlsx', encoding: 'auto', sheet: '1e2', header_row: 1 } },
+      { name: 'c.db', probe: null, settings: { name: 'c.db', encoding: 'auto', table: 'null' } }],
+  });
+  const dir = path.join(tmpDir(), 'shop-a');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'b.xlsx'), 'x');
+  fs.writeFileSync(path.join(dir, 'c.db'), 'x');
+  fs.writeFileSync(path.join(dir, 'meta.md'), draft);
+  const meta = loadMeta(dir);
+  assert.equal(meta.files[0]?.sheet, '1e2');
+  assert.equal(meta.files[1]?.table, 'null');
+  assert.equal(meta.label, '1e2');
+  assert.equal(meta.columns.email, 'yes');
+});
+
+test('R2-6 (D25): a plain UTF-8 detection is written as `encoding: utf-8`, not as something to confirm', () => {
+  const probe = { file: 'a.csv', format: 'csv' as const, encoding: 'utf-8' as const, encodingHow: 'detected' as const, encodingCandidates: ['utf-8' as const], headers: [], rowCount: 0, mappings: [] };
+  const draft = renderMetaDraft({ source: 'shop-a', exportedAt: null, mappings: [], files: [{ name: 'a.csv', probe }] });
+  assert.match(draft, /^ {2}encoding: utf-8 {3}# detected/m);
+  assert.doesNotMatch(draft, /confirm, then write/);
+});
