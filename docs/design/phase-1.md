@@ -52,6 +52,8 @@ export-to-provider (dry-run).
 
 | D31 | A source present in the db but gone from resources/ keeps its rows (D23) and contributes no contact fields; consent overrides naming it are ignored with a warning; overrides applied while it existed stay. review-report reads exact header names from staging stats.json (local pending file only) | director, accepted from T7 rework |
 
+| D32 | Guard applies to **whatever git worktree contains the workspace** (`git -C <ws-or-nearest-existing-parent> rev-parse --show-toplevel`), not only this repository; a `.git` entry that git cannot resolve (incl. a dangling symlink) refuses. Every write of a file into the workspace that may already exist goes through one helper (temp file with `wx` in the same dir + rename) so an existing symlink at the target is replaced, never followed. JSON output is sanitized value by value before serialization, never as a string. Recovery after a report publication failure = re-run clean-and-merge (merges are full and idempotent, D30). Accepted limitation: a SQLite `query` returning duplicate column names is refused with a message asking for unique aliases | director, R4 |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
