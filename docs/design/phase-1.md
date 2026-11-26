@@ -50,6 +50,8 @@ export-to-provider (dry-run).
 
 | D30 | Every real merge processes **all** sources with meta.md (a full recompute of derived tables; contacts and suppressions are still never deleted). `clean-and-merge --source <name>` is allowed only together with `--dry-run` (stage + report preview). Reason: partial merges left withdrawn consent overrides and stale names in place (review R3) | director, R3 |
 
+| D31 | A source present in the db but gone from resources/ keeps its rows (D23) and contributes no contact fields; consent overrides naming it are ignored with a warning; overrides applied while it existed stay. review-report reads exact header names from staging stats.json (local pending file only) | director, accepted from T7 rework |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
