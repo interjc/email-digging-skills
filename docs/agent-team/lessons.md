@@ -4,5 +4,4 @@ Back to the [board](README.md). Newest first. Record a row when the user correct
 
 | Date | Source | Lesson or adjustment | Promoted to |
 |---|---|---|---|
-
 | 2026-11-26 | user (relayed from side chat) | Real exports include Notion-style form data: English month-name dates with AM/PM, `Submission time` headers, duplicate CSVs with reordered columns, and per-entry .md subfolders. | Added R5 formats, R6 synonyms, R9 directory rules, fixture `form-eta` ([phase-1.md](../design/phase-1.md)); real column names stay in workspace meta.md only (AGENTS.md rule 8). |
