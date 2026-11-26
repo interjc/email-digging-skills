@@ -189,3 +189,6 @@ vite.config.ts.timestamp-*
 .nx/cache
 .nx/workspace-data
 .nx/migrate-runs
+
+# Local agent settings
+.claude/settings.local.json
