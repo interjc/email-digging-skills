@@ -69,7 +69,7 @@ source memberships from staged data. This table is not an import history.
 | `last_seen_at` | Last-seen date from source data, or null if unavailable. |
 | `occurrences` | Number of rows in the source that produced the address. Defaults to `1`. |
 | `files` | JSON array of contributing filenames. Defaults to `[]`. |
-| `raw_fields` | JSON object of original columns from the representative row. Defaults to `{}`. |
+| `raw_fields` | JSON object of original columns from the representative row. Defaults to `{}`. When the address has several rows in the source (for example two user ids), `_merged_rows` lists the other rows, most recent first, as `{file, row_number, fields}` with only the differing values, capped at 20; `_merged_rows_omitted` counts the rest (D36). |
 
 ### `consents`
 

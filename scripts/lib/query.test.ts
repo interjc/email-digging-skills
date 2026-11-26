@@ -131,3 +131,24 @@ test('R5-1 (D33): masking is fail-closed: computed columns and consent evidence 
     db.close();
   }
 });
+
+test('D36: raw_fields keys named file/column are masked; _merged_rows metadata passes, its fields are masked', () => {
+  const db = openDb(':memory:');
+  try {
+    migrate(db, migrations);
+    db.exec(`
+      INSERT INTO sources (name, kind, priority, updated_at) VALUES ('a', 'product', 1, '2026');
+      INSERT INTO contacts (id, email, email_domain, name, email_status, created_at, updated_at) VALUES
+        (1, 'taro@example.jp', 'example.jp', 'Taro Yamada', 'valid', '2026-01-02', '2026-01-02');
+      INSERT INTO contact_sources (contact_id, source, raw_email, raw_fields) VALUES
+        (1, 'a', 'taro@example.jp', '{"file":"Taro Yamada","column":"Hanako Sato","_merged_rows":[{"file":"a.csv","row_number":7,"fields":{"file":"Taro Yamada","Name":"Hanako Sato"}}]}');
+    `);
+    const r = executeQuery(db, { sql: 'SELECT raw_fields FROM contact_sources' }, 50);
+    assert.ok('rows' in r);
+    assert.equal(/Taro Yamada|Yamada|Hanako/.test(JSON.stringify(r.rows)), false);
+    const raw = r.rows[0]?.raw_fields as { _merged_rows: Array<Record<string, unknown>> };
+    assert.deepEqual([raw._merged_rows[0]?.file, raw._merged_rows[0]?.row_number], ['a.csv', 7]);
+  } finally {
+    db.close();
+  }
+});

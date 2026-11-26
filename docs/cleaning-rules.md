@@ -163,8 +163,27 @@ which tables are rebuilt and which keep history.
 
 Representative row for each (address, source): the newest file wins, judged by a `YYYY-MM-DD`
 date in the file name; files without a date rank below dated ones, in their `meta.md` order
-(later = newer); within the file, the lowest row number wins. Contact-level `first_seen_at` is
-the earliest `first_seen_at` over all of the contact's sources.
+(later = newer). Within the file, the latest activity wins (`last_seen_at`, else `created_at`), so
+when one person registered twice under different user ids, the latest user is the representative
+(D36). Rows with no dates fall back to the later row number; this is only a deterministic
+tiebreak, because export order does not reliably say which account is newer. Contact-level
+`first_seen_at` is the earliest `first_seen_at` over all of the contact's sources.
+
+Rows of the same address in one source are merged into one `contact_sources` row (D36):
+
+- `name` and `locale` take the first non-empty value in that recency order, so an empty name on the
+  latest user is filled from an older one. Across sources, source priority still decides.
+- `raw_fields` is the representative's original columns plus `_merged_rows`: for each other row,
+  most recent first, `{file, row_number, fields}`, where `fields` holds only the values that differ
+  from the representative. Rows with the same differences are kept once. At most 20 entries are
+  kept, and the rest are counted in `_merged_rows_omitted`. If a source has a real column named
+  `_merged_rows`, its rows are not stacked, and the merge warns once.
+- Consent is not "latest user wins". The newest file decides, and inside it one `denied` row blocks
+  the address, even when a later registration said yes (D15). Use `overrides/consents.yaml` for a
+  real exception.
+- Markers that live only in `raw_fields`, such as a blocked or suspended flag, may sit on an older
+  row inside `_merged_rows`. When you query for them, scan `_merged_rows` too, treat a marker on any
+  row as applying to the address, and record it in `overrides/suppressions.yaml`.
 
 ## Human overrides
 

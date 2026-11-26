@@ -1,4 +1,4 @@
-// Merge staged sources into the main SQLite database (D3, D8, D14, D15, D22, D23, D30).
+// Merge staged sources into the main SQLite database (D3, D8, D14, D15, D22, D23, D30, D36).
 // One transaction per call; the caller makes the backup first (backupDb) and creates the runs row.
 // D30: a real merge always gets every source with a meta.md, so contact fields, contact_sources and
 // consents are a full recompute from the current inputs. Sources whose directory (or meta.md) is gone
@@ -12,6 +12,7 @@ import type {
   ConsentBasis, ConsentStatus, EmailStatus, Flag, MergeStats, Overrides, PipelineConfig, RejectReason,
   SourceKind, SourceMeta, SourceStageResult,
 } from './types.ts';
+import { MERGED_ROWS_KEY, MERGED_ROWS_OMITTED_KEY } from './types.ts';
 import { connect, ensureExtension, sqlStr } from './read/duck.ts';
 import { normalizeEmailCell } from './email/normalize.ts';
 import { maskEmail } from './mask.ts';
@@ -210,16 +211,67 @@ function rank(src: StagedSource, file: string): number {
   return src.ranks.get(file) ?? -1;
 }
 
-/** Representative row: newest file, then lowest row_number (then split_index). */
-function representative(src: StagedSource, rows: StagedRecord[]): StagedRecord {
-  let best = rows[0] as StagedRecord;
+const activity = (r: StagedRecord): string => r.last_seen_at ?? r.created_at ?? '';
+
+/**
+ * D36: rows of one source for one address, most recent first: newest file (D8 file rank), then latest
+ * activity (last_seen_at, else created_at), then the later row_number, then split_index. The row_number
+ * step is only a deterministic tiebreak for rows without dates (export order is not a reliable age).
+ * The first row is the representative ("the latest user wins"). Groups are sorted once, right after
+ * grouping, so every later step (name/locale fill, typo suggestion, raw_fields, consent) sees one order.
+ */
+function byRecency(src: StagedSource, rows: StagedRecord[]): StagedRecord[] {
+  return rows.sort((a, b) =>
+    (rank(src, b.file) - rank(src, a.file))
+    || (activity(b) < activity(a) ? -1 : activity(b) > activity(a) ? 1 : 0)
+    || (b.row_number - a.row_number)
+    || (a.split_index - b.split_index));
+}
+
+/** D36: first non-empty value in recency order (an empty value in the latest row is filled from older rows). */
+function latestNonEmpty(rows: StagedRecord[], pick: (r: StagedRecord) => string | null): string | null {
   for (const r of rows) {
-    const d = rank(src, r.file) - rank(src, best.file);
-    if (d > 0 || (d === 0 && (r.row_number < best.row_number || (r.row_number === best.row_number && r.split_index < best.split_index)))) {
-      best = r;
-    }
+    const v = pick(r);
+    if (!isEmpty(v)) return v;
   }
-  return best;
+  return null;
+}
+
+/** At most this many stacked entries per (address, source); the rest is counted in `_merged_rows_omitted`. */
+export const MERGED_ROWS_CAP = 20;
+
+/**
+ * D36: raw_fields of the representative plus `_merged_rows`: for each other row of the same address in this
+ * source (most recent first) `{file, row_number, fields}` with the fields whose value differs from the
+ * representative. Entries with the same differing fields are collapsed to the most recent one; at most
+ * MERGED_ROWS_CAP entries are kept. A source that has a real column named `_merged_rows` gets no stacking
+ * (its column is kept as is) and the caller warns once.
+ */
+function mergedRawFields(rows: StagedRecord[], onReservedKey: () => void): string {
+  const [rep, ...others] = rows;
+  if (!rep) return '{}';
+  if (others.length === 0) return rep.raw_fields;
+  const base = JSON.parse(rep.raw_fields) as Record<string, unknown>;
+  if (MERGED_ROWS_KEY in base || MERGED_ROWS_OMITTED_KEY in base) {
+    onReservedKey();
+    return rep.raw_fields;
+  }
+  const merged: Array<{ file: string; row_number: number; fields: Record<string, unknown> }> = [];
+  const seen = new Set<string>();
+  let omitted = 0;
+  for (const r of others) {
+    const fields = JSON.parse(r.raw_fields) as Record<string, unknown>;
+    const diff: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(fields)) if (JSON.stringify(v) !== JSON.stringify(base[k])) diff[k] = v;
+    if (Object.keys(diff).length === 0) continue;
+    const sig = JSON.stringify(diff);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    if (merged.length >= MERGED_ROWS_CAP) { omitted++; continue; }
+    merged.push({ file: r.file, row_number: r.row_number, fields: diff });
+  }
+  if (merged.length === 0) return rep.raw_fields;
+  return JSON.stringify({ ...base, [MERGED_ROWS_KEY]: merged, ...(omitted > 0 ? { [MERGED_ROWS_OMITTED_KEY]: omitted } : {}) });
 }
 
 function minStr(values: Array<string | null>): string | null {
@@ -352,6 +404,7 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
       list.push(r);
     }
   }
+  for (const perSource of byEmail.values()) for (const [source, rows] of perSource) byRecency(bySource.get(source) as StagedSource, rows);
 
   // 3. contacts -----------------------------------------------------------------------------------
   const existing = new Map(
@@ -379,13 +432,12 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     let domain = '';
     for (const [source, rows] of perSource) {
       const src = bySource.get(source) as StagedSource;
-      const rep = representative(src, rows);
-      const typoRows = rows.filter((r) => r.suggested_email !== null);
+      const rep = rows[0] as StagedRecord; // D36: rows are in recency order
       candidates.push({
         prio: prio.get(source) as number,
-        name: rep.name,
-        locale: rep.locale,
-        suggestion: typoRows.length > 0 ? representative(src, typoRows).suggested_email : null,
+        name: latestNonEmpty(rows, (r) => r.name),
+        locale: latestNonEmpty(rows, (r) => r.locale),
+        suggestion: rows.find((r) => r.suggested_email !== null)?.suggested_email ?? null,
       });
       for (const r of rows) for (const f of r.flags) flagSet.add(f);
       domain = rep.email_domain;
@@ -416,16 +468,21 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
   const insCs = db.prepare(`
     INSERT INTO contact_sources (contact_id, source, raw_email, first_seen_at, last_seen_at, occurrences, files, raw_fields)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const reservedWarned = new Set<string>();
   for (const email of emails) {
     const id = contactId.get(email) as number;
     for (const [source, rows] of byEmail.get(email) as Map<string, StagedRecord[]>) {
-      const rep = representative(bySource.get(source) as StagedSource, rows);
+      const rep = rows[0] as StagedRecord;
       const files = [...new Set(rows.map((r) => r.file))].sort(cmp);
       insCs.run(
         id, source, rep.raw_email,
         minStr(rows.map((r) => r.created_at)),
         maxStr(rows.map((r) => r.last_seen_at ?? r.created_at)),
-        rows.length, JSON.stringify(files), rep.raw_fields,
+        rows.length, JSON.stringify(files), mergedRawFields(rows, () => {
+          if (reservedWarned.has(source)) return;
+          reservedWarned.add(source);
+          warn(`source "${source}" has a column named ${MERGED_ROWS_KEY}; rows of one address are not stacked for this source (D36)`);
+        }),
       );
     }
   }
@@ -449,12 +506,11 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
         upsertConsent.run(id, source, 'unknown', null, null);
         continue;
       }
-      // D15: the newest file decides; inside that file `denied` wins; then the first row.
+      // D15: the newest file decides; inside that file `denied` wins (D36 keeps this: the latest user does
+      // not override an opt-out); otherwise the most recent row (D36 recency order, same as the representative).
       let newest = -Infinity;
       for (const r of decisive) newest = Math.max(newest, rank(src, r.file));
-      const inFile = decisive
-        .filter((r) => rank(src, r.file) === newest)
-        .sort((a, b) => a.row_number - b.row_number || a.split_index - b.split_index);
+      const inFile = decisive.filter((r) => rank(src, r.file) === newest);
       const pick = inFile.find((r) => r.consent_status === 'denied') ?? (inFile[0] as StagedRecord);
       const evidence = JSON.stringify({
         column: src.consentColumn.get(pick.file) ?? null,

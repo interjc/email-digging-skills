@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-commit and CI safety checks**: `scripts/check-staged-emails.ts` (scanning UTF-8, UTF-16, CP932, GB18030, `.xlsx` XML, and binary ASCII runs for non-`example.*` addresses), `.githooks/pre-commit`, `.gitleaks.toml`, deterministic synthetic fixtures (`scripts/make-fixtures.ts`), and GitHub Actions CI.
 - **Vendor-neutral skills and specifications**: seven skills under `skills/` (symlinked from `.claude/skills` and `.agents/skills`), specifications under `docs/`, and bilingual documentation (`README.md`, `README.zh-CN.md`).
 
+- **Same address under several user ids** (D36): inside one source the latest user (newest file, then latest activity) is the representative, an empty name or locale is filled from older rows, and the other rows are stacked in `raw_fields._merged_rows` (differing values only, capped at 20). Consent still lets a denial in the newest file win.
 - **`check-domains --auto-accept`**: standing rule that writes accept decisions for typo suggestions to curated popular providers into `overrides/typo-decisions.yaml` (other suggestions stay for human review).
 
 ### Known limitations

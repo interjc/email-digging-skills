@@ -5,6 +5,7 @@ import { backupStamp } from './db.ts';
 import { maskEmail, maskName, maskValue } from './mask.ts';
 import { sanitizeText } from './sanitize.ts';
 import type { ProviderList } from './types.ts';
+import { MERGED_ROWS_KEY } from './types.ts';
 
 // Use the views as the single source of truth for sendability.
 export const LIST_VIEWS: Record<ProviderList, string> = {
@@ -188,15 +189,20 @@ function redactLeaf(label: string, value: unknown): unknown {
   return maskFreeText(text);
 }
 
-function redactJson(value: unknown, label = ''): unknown {
-  if (Array.isArray(value)) return value.map((v: unknown) => redactJson(v, label));
+/**
+ * `meta` marks objects whose `column` / `file` keys name the source, not the person: the top level of
+ * consents.evidence and each entry of raw_fields._merged_rows (D36). Everywhere else (a source column that
+ * happens to be called "file") the value is masked like any other field.
+ */
+function redactJson(value: unknown, label = '', meta = false): unknown {
+  if (Array.isArray(value)) return value.map((v: unknown) => redactJson(v, label, meta));
   if (value && typeof value === 'object') {
     const row = value as Record<string, unknown>;
     return Object.fromEntries(Object.entries(row).map(([key, cell]) => {
       // consents.evidence: {"column","file","row_number","value"}; column and file name the source, not the person.
-      if ((key === 'column' || key === 'file') && typeof cell === 'string') return [sanitizeText(key), sanitizeText(cell)];
-      const inner = key === 'value' && typeof row.column === 'string' ? row.column : key;
-      return [sanitizeText(key), redactJson(cell, inner)];
+      if (meta && (key === 'column' || key === 'file') && typeof cell === 'string') return [sanitizeText(key), sanitizeText(cell)];
+      const inner = meta && key === 'value' && typeof row.column === 'string' ? row.column : key;
+      return [sanitizeText(key), redactJson(cell, inner, !meta && key === MERGED_ROWS_KEY)];
     }));
   }
   return redactLeaf(label, value);
@@ -222,7 +228,7 @@ export function redactCell(field: string, value: unknown, origin: ColumnOrigin |
   if (key && REDACTED_COLUMNS.has(key)) return '<redacted>';
   if (key && JSON_COLUMNS.has(key)) {
     try {
-      return redactJson(JSON.parse(text) as unknown);
+      return redactJson(JSON.parse(text) as unknown, '', key === 'consents.evidence');
     } catch {
       return '<invalid JSON redacted>';
     }

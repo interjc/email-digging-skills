@@ -291,4 +291,8 @@ export interface Provider {
 //   workspace is missing, not initialized, or inside the repo but not git-ignored.
 // - stdout is masked by default. Full values only go to the database and output/exports/.
 // - Exit codes: 0 ok, 1 error, 2 precondition failed (workspace / confirmation missing).
+/** D36: keys merge adds to contact_sources.raw_fields for other rows of the same address in one source. */
+export const MERGED_ROWS_KEY = '_merged_rows';
+export const MERGED_ROWS_OMITTED_KEY = '_merged_rows_omitted';
+
 export const EXIT = { OK: 0, ERROR: 1, PRECONDITION: 2 } as const;

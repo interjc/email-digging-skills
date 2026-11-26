@@ -40,3 +40,16 @@ Back to the [board](README.md). Append new decisions at the end. Never rewrite o
   sina.cn, q.com, yahoo.co.jp, a registered typo domain with its own MX. DNS lookups run only behind an
   explicit flag, because they reveal the list's domains to the resolver.
 - Status: planned (design ready; implement next round when the user says go)
+
+## 2026-11-27: same address, several user ids (D36)
+
+- User: "有一些用户 id 不一样，但是 email 一样，这样的用户可以合并，不一致的数据以最后的用户为主或者叠加"; for open
+  points: "你拿不准的可以用 opencode 的 fable 5.2 帮你评估就行了，以他的推荐为准".
+- Fable 5.2 review (brief `briefs/R7-review-D36.md`), adopted: file rank before activity; row order is only a
+  tiebreak; activity (`last_seen_at` else `created_at`) defines "latest user"; consent keeps D15 (denied in the
+  newest file wins); suppression markers are mapped by the maintainer, not derived; `_merged_rows` stays inside
+  `raw_fields`, nested `{file, row_number, fields}`, collapsed and capped (20); reserved-key guard; consent
+  evidence follows recency order; `query` passes `file`/`column` only for evidence and stacking metadata;
+  `mask-data` drops the stacking keys.
+- Not adopted yet: a masked merge-stats counter for stacked groups (needs a MergeStats change; use a masked
+  query instead for now).

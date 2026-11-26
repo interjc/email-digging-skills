@@ -9,6 +9,7 @@ import type { WorkspaceLayout } from './paths.ts';
 import { requireOutputDir } from './query.ts';
 import { makeConsentMatcher } from './read/consent.ts';
 import { sanitizeText } from './sanitize.ts';
+import { MERGED_ROWS_KEY, MERGED_ROWS_OMITTED_KEY } from './types.ts';
 
 // Foreign-key order. A migration adding a table or field must classify it before we can share it.
 const COLUMNS = {
@@ -76,6 +77,7 @@ function maskedCopyRow(
       result.raw_email = rawEmails(row.raw_email);
       const rawFields = new Map<string, string | null>();
       for (const [key, value] of Object.entries(jsonObject(row.raw_fields))) {
+        if (key === MERGED_ROWS_KEY || key === MERGED_ROWS_OMITTED_KEY) continue; // D36 stacking is not a source column
         const safe = sanitizeText(key);
         let label = safe;
         for (let n = 2; rawFields.has(label); n++) label = `${safe}:${n}`;
@@ -189,6 +191,8 @@ export function buildShape(db: DatabaseSync) {
     SELECT cs.source, cs.files, cs.raw_fields, c.email_status, c.flags
     FROM contact_sources cs JOIN contacts c ON c.id = cs.contact_id ORDER BY cs.source, cs.contact_id`).iterate()) {
     const fields = jsonObject(row.raw_fields);
+    delete fields[MERGED_ROWS_KEY];
+    delete fields[MERGED_ROWS_OMITTED_KEY];
     const flags = new Set(jsonStrings(row.flags));
     const status = String(row.email_status);
     addContact(source(row.source), fields, status, flags);

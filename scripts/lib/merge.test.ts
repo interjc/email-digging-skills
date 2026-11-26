@@ -397,8 +397,11 @@ test('a 150 000-row group for one address merges (no argument spreads over rows)
   const w: Ws = { layout, db };
   const { stats } = await run(w);
   assert.equal(stats.contacts_total, 1);
-  const cs = get(db, 'SELECT occurrences FROM contact_sources');
+  const cs = get(db, 'SELECT occurrences, raw_fields FROM contact_sources');
   assert.equal(cs?.occurrences, N);
+  // D36: 149 999 identical older rows collapse into one stacked entry; the cell stays small.
+  assert.equal((JSON.parse(String(cs?.raw_fields))._merged_rows as unknown[]).length, 1);
+  assert.ok(String(cs?.raw_fields).length < 500);
   const k = consentOf(db, 'bulk@example.com', 'big');
   assert.equal(k?.status, 'denied');
   assert.equal(JSON.parse(String(k?.evidence)).row_number, N);
@@ -436,4 +439,117 @@ test('typo counter: a reject counts only when its address is among the original 
   assert.equal(stats.overrides_applied.typo, 3);
   assert.ok(warnings.some((m) => m.includes('y***@e***e.com (reject) matched no address')), warnings.join('\n'));
   w.db.close();
+});
+
+/** One UTF-8 source `users-d36` with the given files ({name: csv text}); meta.md lists them in this order. */
+function d36Workspace(files: Record<string, string>, columns: string): Ws {
+  const ws = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 't7-d36-')), 'ws');
+  const layout = workspaceLayout(ws);
+  for (const d of layoutDirs(layout)) fs.mkdirSync(d, { recursive: true });
+  const dir = path.join(layout.resources, 'users-d36');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+  const list = Object.keys(files).map((n) => `  - name: ${n}\n    encoding: utf-8\n`).join('');
+  fs.writeFileSync(path.join(dir, 'meta.md'), `---\nsource: users-d36\nkind: product\nfiles:\n${list}columns:\n${columns}consent_basis: opt_in\nexported_at: 2025-06-01\n---\n`);
+  const db = openDb(layout.dbPath);
+  migrate(db, path.join(repo, 'schema', 'migrations'));
+  return { layout, db };
+}
+
+function d36Source(w: Ws, email: string) {
+  const cs = get(w.db, `SELECT cs.occurrences, cs.first_seen_at, cs.last_seen_at, cs.raw_fields FROM contact_sources cs
+    JOIN contacts c ON c.id = cs.contact_id WHERE c.email = ?`, email);
+  return { occurrences: cs?.occurrences, first_seen_at: cs?.first_seen_at, last_seen_at: cs?.last_seen_at, raw: JSON.parse(String(cs?.raw_fields)) as Record<string, unknown> };
+}
+
+type Stacked = Array<{ file: string; row_number: number; fields: Record<string, unknown> }>;
+
+test('D36: same address under two user ids in one source: the latest row wins, empty values are filled, other rows are stacked', async () => {
+  const w = d36Workspace({
+    'users_2025-06-01.csv': [
+      'User ID,Email,Name,Lang,Created,Last Used,Newsletter,Plan',
+      'U3,dup@example.org,,,2025-03-01,,yes,paid',
+      'U1,dup@example.org,Old Name,ja,2025-01-01,,no,free',
+      'U2,other@example.org,Other,en,2025-01-02,,yes,free',
+      'U4,same@example.org,Same,en,2025-02-01,,yes,free',
+      'U4,same@example.org,Same,en,2025-02-01,,yes,free',
+      // An old account still in use beats a newer registration that was never used (activity first).
+      'U5,active@example.org,Active Old,en,2024-01-01,2025-05-20,yes,paid',
+      'U6,active@example.org,Active New,en,2025-04-01,,yes,free',
+      // file / row_number columns of the source must not overwrite the stacking metadata.
+      'U7,meta@example.org,Meta,en,2025-01-01,,yes,free',
+      'U8,meta@example.org,Meta,en,2025-02-01,,yes,paid',
+    ].join('\n') + '\n',
+  }, '  email: Email\n  name: Name\n  locale: Lang\n  created_at: Created\n  last_seen_at: Last Used\n  consent: Newsletter\n');
+  await run(w);
+
+  const dup = d36Source(w, 'dup@example.org');
+  assert.equal(dup.occurrences, 2);
+  assert.equal(dup.first_seen_at, '2025-01-01');
+  // U3 registered later (created 2025-03-01), so it is the representative even though it comes first.
+  assert.equal(dup.raw['User ID'], 'U3');
+  assert.equal(dup.raw.Plan, 'paid');
+  const stacked = dup.raw._merged_rows as Stacked;
+  assert.equal(stacked.length, 1);
+  assert.equal(stacked[0]?.file, 'users_2025-06-01.csv');
+  assert.equal(typeof stacked[0]?.row_number, 'number');
+  assert.deepEqual(stacked[0]?.fields, { 'User ID': 'U1', Name: 'Old Name', Lang: 'ja', Created: '2025-01-01', Newsletter: 'no', Plan: 'free' });
+  // The latest row has no name and no locale: the older row fills both.
+  const c = get(w.db, 'SELECT name, locale FROM contacts WHERE email = ?', 'dup@example.org');
+  assert.deepEqual([c?.name, c?.locale], ['Old Name', 'ja']);
+  // Consent (D15 kept): inside one file a denial wins over the later user's grant; evidence names that row.
+  const consent = get(w.db, `SELECT k.status, k.evidence FROM consents k JOIN contacts c ON c.id = k.contact_id WHERE c.email = ?`, 'dup@example.org');
+  assert.equal(consent?.status, 'denied');
+  assert.equal(JSON.parse(String(consent?.evidence)).row_number, stacked[0]?.row_number);
+
+  const active = d36Source(w, 'active@example.org');
+  assert.equal(active.raw['User ID'], 'U5');
+  assert.equal(active.last_seen_at, '2025-05-20');
+  assert.equal(get(w.db, 'SELECT name FROM contacts WHERE email = ?', 'active@example.org')?.name, 'Active Old');
+
+  // Identical duplicate rows add nothing to stack.
+  const same = d36Source(w, 'same@example.org');
+  assert.equal(same.occurrences, 2);
+  assert.equal('_merged_rows' in same.raw, false);
+
+  // Re-running is idempotent.
+  const first = snapshot(w.db);
+  await run(w);
+  assert.deepEqual(snapshot(w.db), first);
+  w.db.close();
+});
+
+test('D36: an older file with later activity loses to the newest file; stacking is capped and collapsed; a reserved column disables it', async () => {
+  const header = 'User ID,Email,Name,Created,Last Login';
+  const many = Array.from({ length: 30 }, (_, i) => `M${String(i).padStart(2, '0')},shared@example.org,Shared,2025-01-01,2025-02-${String(i % 28 + 1).padStart(2, '0')}`);
+  const w = d36Workspace({
+    'users_2025-01-01.csv': [header, 'A1,moved@example.org,From Old,2024-01-01,2025-12-31'].join('\n') + '\n',
+    'users_2025-06-01.csv': [header, 'A2,moved@example.org,From New,2025-03-01,', ...many,
+      'S1,twice@example.org,Twice,2025-01-01,2025-01-05', 'S2,twice@example.org,Twice,2025-01-01,2025-01-05', 'S3,twice@example.org,Twice,2025-01-01,2025-03-01'].join('\n') + '\n',
+  }, '  email: Email\n  name: Name\n  created_at: Created\n  last_seen_at: Last Login\n');
+  await run(w);
+
+  const moved = d36Source(w, 'moved@example.org');
+  assert.equal(moved.raw['User ID'], 'A2', 'newest file first, even when an older file has a later activity date');
+  assert.equal((moved.raw._merged_rows as Stacked)[0]?.file, 'users_2025-01-01.csv');
+  assert.equal(get(w.db, 'SELECT name FROM contacts WHERE email = ?', 'moved@example.org')?.name, 'From New');
+
+  const shared = d36Source(w, 'shared@example.org');
+  assert.equal(shared.occurrences, 30);
+  assert.equal((shared.raw._merged_rows as Stacked).length, 20);
+  assert.equal(shared.raw._merged_rows_omitted, 9);
+
+  // S1 and S2 differ from the representative S3 the same way except for the id: two entries, not collapsed.
+  const twice = d36Source(w, 'twice@example.org');
+  assert.equal(twice.raw['User ID'], 'S3');
+  assert.deepEqual((twice.raw._merged_rows as Stacked).map((e) => e.fields['User ID']), ['S2', 'S1']);
+  w.db.close();
+
+  const r = d36Workspace({
+    'users_2025-06-01.csv': ['Email,Name,_merged_rows', 'x@example.org,X1,kept', 'x@example.org,X2,other'].join('\n') + '\n',
+  }, '  email: Email\n  name: Name\n');
+  const { warnings } = await run(r);
+  assert.equal(d36Source(r, 'x@example.org').raw._merged_rows, 'other');
+  assert.equal(warnings.filter((m) => m.includes('_merged_rows')).length, 1);
+  r.db.close();
 });
