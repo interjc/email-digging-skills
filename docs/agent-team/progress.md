@@ -5,6 +5,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 ## Status snapshot
 
 <!-- newest first: one entry per recently accepted, committed or in-flight task -->
+- 2026-11-26: T9 accepted (6b128f2, agy-sha gemini-4-carbon). R5 finding 1 fixed by director (b059e4e), 2–7 deferred on the T8 card. Phase 1 code complete; only T10 part 2 (real data) remains, waiting for the user's go-ahead.
 - 2026-11-26: T0–T7 accepted and committed; T8 committed (306c43f), review R5 running on Codex gpt-leon; T9 running on agy-sha; T10 demo wiring committed (390d928), real-data run waits for T9 + user confirmation.
 - 2026-11-26: T1–T6 dispatched in parallel (T1 OpenCode gpt-6.2-sol, T2 Codex gpt-leon gpt-6.2-sol, T3+T4 agy-sha gemini-4-neon, T5+T6 in-house Sonnet 5.5). T0 contracts committed (3085733, c444d93, 7ebdf26).
 
@@ -16,9 +17,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 
 ## Next-up queue
 
-1. Collect R5 (T8 review); fix or send rework to a non-OpenCode-GPT channel.
-2. Collect T9 (agy-sha); review and commit.
-3. T10 part 2: ask the user to confirm real files + meta.md, then dry-run, then merge (masked output only).
+1. T10 part 2: ask the user to confirm real files + meta.md, then dry-run, then merge (masked output only).
 
 ## Session choice
 
