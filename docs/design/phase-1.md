@@ -116,7 +116,7 @@ Open (not needed for phase 1, asked later): verification service; which real sou
 9. No Gmail dot/plus folding; `+tag` stays part of the address.
 
 ### R2 Masking (`scripts/lib/mask.ts`)
-- `maskEmail('taro@gmail.com')` → `t***@g***l.com`: local = first char + `***`; domain = first label
+- `maskEmail('taro@example.com')` → `t***@e***e.com`: local = first char + `***`; domain = first label
   masked as first char + `***` + last char (labels of 1–2 chars → first char + `***`), remaining
   labels kept (`docomo.ne.jp` → `d***o.ne.jp`). Invalid input → `***`.
 - `maskName('山田太郎')` → `山***`; `'山田'` → `山*`: first character (grapheme) + one `*` per remaining

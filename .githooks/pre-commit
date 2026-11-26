@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+node scripts/check-staged-emails.ts
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --redact --no-banner
+else
+  echo "pre-commit: gitleaks not found on PATH; skipping secret scan" >&2
+fi

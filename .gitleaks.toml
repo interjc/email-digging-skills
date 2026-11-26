@@ -1,0 +1,11 @@
+title = "email-digging-skills gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow synthetic test fixtures for generic-api-key false positives only"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^fixtures/''',
+]
