@@ -22,8 +22,8 @@ The director (L1) maintains this file. Each card under `tasks/` has exactly one 
 | [T4](tasks/T4.md) | Synthetic fixtures + generator | outsource | director | committed |
 | [T5](tasks/T5.md) | Workspace, config, env, overrides, db + init-workspace CLI | direct | in-house sonnet-5.5 · high | committed |
 | [T6](tasks/T6.md) | Probe, decode, read, column detect, staging + add-source CLI | direct | in-house sonnet-5.5 · high | committed |
-| [T7](tasks/T7.md) | Merge into SQLite, reports, clean-and-merge + review-report CLIs | direct | director | planned |
-| [T8](tasks/T8.md) | query, mask-data, export CLIs + provider interface + listmonk dry-run | direct | director | planned |
+| [T7](tasks/T7.md) | Merge into SQLite, reports, clean-and-merge + review-report CLIs | direct | director | in-progress |
+| [T8](tasks/T8.md) | query, mask-data, export CLIs + provider interface + listmonk dry-run | direct | director | in-progress |
 | [T9](tasks/T9.md) | Skills SKILL.md, README (en, zh-CN), CONTRIBUTING, apps/providers READMEs | outsource | director | planned |
 | [T10](tasks/T10.md) | Demo run, end-to-end on fixtures, then real-data run with user confirmation | direct | director | planned |
 
