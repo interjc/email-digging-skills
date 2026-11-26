@@ -14,6 +14,7 @@ import { parseEnv, setEnvValue } from './lib/env.ts';
 import { withWorkspaceLock } from './lib/lock.ts';
 import { sanitizeDeep, sanitizeError } from './lib/sanitize.ts';
 import { openDb, migrate } from './lib/db.ts';
+import { cleanAndMerge } from './clean-and-merge.ts';
 import {
   SAFETY_FIX, checkWorkspaceSafety, layoutDirs, repoRoot, resolveWorkspace, workspaceLayout,
 } from './lib/paths.ts';
@@ -235,7 +236,7 @@ function copyDirContents(from: string, to: string): number {
   return n;
 }
 
-function setupDemo(root: string, ws: string, migrationsDir: string): { rows: CheckRow[]; demoWorkspace: string } {
+async function setupDemo(root: string, ws: string, migrationsDir: string): Promise<{ rows: CheckRow[]; demoWorkspace: string }> {
   const demoWorkspace = path.join(ws, '.demo');
   const layout = workspaceLayout(demoWorkspace);
   const rows: CheckRow[] = [ensureLayout(layout)];
@@ -249,9 +250,41 @@ function setupDemo(root: string, ws: string, migrationsDir: string): { rows: Che
     const copied = copyDirContents(sourcesDir, layout.resources) + copyDirContents(overridesDir, layout.overrides);
     rows.push(row('Demo fixtures', 'ok', copied > 0 ? `copied ${copied} file(s)` : 'already present'));
   }
-  rows.push(migrateWorkspaceDb(layout, migrationsDir, 'Demo database'));
-  rows.push(row('Demo pipeline run', 'skipped', 'not wired yet'));
+  const dbRow = migrateWorkspaceDb(layout, migrationsDir, 'Demo database');
+  rows.push(dbRow);
+  const hasSources = fs.existsSync(layout.resources)
+    && fs.readdirSync(layout.resources, { withFileTypes: true })
+      .some((e) => e.isDirectory() && fs.existsSync(path.join(layout.resources, e.name, 'meta.md')));
+  if (dbRow.result === 'fail' || !hasSources) {
+    rows.push(row('Demo pipeline run', 'skipped', dbRow.result === 'fail' ? 'demo database not ready' : 'no fixture source with a meta.md'));
+  } else {
+    rows.push(await runDemoPipeline(root, demoWorkspace, layout));
+  }
   return { rows, demoWorkspace };
+}
+
+/** Full clean-and-merge on the demo workspace (fixtures only), summarized in one row. */
+async function runDemoPipeline(root: string, demoWorkspace: string, layout: WorkspaceLayout): Promise<CheckRow> {
+  const fix = `run \`node scripts/clean-and-merge.ts --workspace ${demoWorkspace}\` to see the full output`;
+  try {
+    const r = await cleanAndMerge({ workspace: demoWorkspace, repoRoot: root });
+    const m = r.report.merge;
+    if (r.status === 'failed' || !m) return row('Demo pipeline run', 'warn', `clean-and-merge ${r.status}`, fix);
+    const db = openDb(layout.dbPath, { readonly: true });
+    let strict = 0;
+    let notBlocked = 0;
+    try {
+      strict = Number((db.prepare('SELECT count(*) AS n FROM v_sendable_strict').get() as { n: number }).n);
+      notBlocked = Number((db.prepare('SELECT count(*) AS n FROM v_not_blocked').get() as { n: number }).n);
+    } finally {
+      db.close();
+    }
+    const report = path.relative(demoWorkspace, r.paths.md);
+    return row('Demo pipeline run', 'ok',
+      `${m.contacts_total} contacts, ${m.cross_source_dups} in 2+ sources, strict list ${strict}, not blocked ${notBlocked}; report ${report}`);
+  } catch (err) {
+    return row('Demo pipeline run', 'warn', errText(err), fix);
+  }
 }
 
 // --- orchestration ---------------------------------------------------------------------------------
@@ -298,7 +331,7 @@ export async function initWorkspace(opts: InitOpts = {}): Promise<InitResult> {
     // 7. demo
     let demoWorkspace: string | null = null;
     if (opts.demo) {
-      const demo = setupDemo(root, workspace, migrationsDir);
+      const demo = await setupDemo(root, workspace, migrationsDir);
       checks.push(...demo.rows);
       demoWorkspace = demo.demoWorkspace;
     }

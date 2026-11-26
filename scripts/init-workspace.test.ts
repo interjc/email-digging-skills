@@ -173,7 +173,8 @@ test('--demo: separate .demo workspace with its own database and copied fixtures
   assert.ok(fs.existsSync(path.join(demo, 'overrides', 'exclude.yaml')));
   assert.ok(fs.existsSync(workspaceLayout(demo).dbPath));
   assert.notEqual(workspaceLayout(demo).dbPath, workspaceLayout(r.workspace).dbPath);
-  assert.equal(byName(r, 'Demo pipeline run')?.detail, 'not wired yet');
+  // The stub meta.md is not a valid source: the demo run is reported, never fatal for init.
+  assert.equal(byName(r, 'Demo pipeline run')?.result, 'warn');
 
   fs.writeFileSync(path.join(demo, 'resources', 'shop', 'meta.md'), 'edited\n');
   await run(root, { demo: true });
@@ -181,6 +182,27 @@ test('--demo: separate .demo workspace with its own database and copied fixtures
 
   const without = await run(makeRepo());
   assert.equal(without.demo_workspace, null);
+});
+
+test('--demo runs the full pipeline on the real fixtures: totals equal fixtures/expected.json, re-run stable', async () => {
+  const root = makeRepo();
+  fs.cpSync(path.join(REAL, 'fixtures'), path.join(root, 'fixtures'), { recursive: true });
+  const expected = JSON.parse(fs.readFileSync(path.join(REAL, 'fixtures', 'expected.json'), 'utf8'));
+  const want = `${expected.contacts_total} contacts, ${expected.cross_source_dups} in 2+ sources, strict list 17, not blocked 29`;
+  const r1 = await run(root, { demo: true });
+  const row1 = byName(r1, 'Demo pipeline run');
+  assert.equal(row1?.result, 'ok', row1?.detail ?? '');
+  assert.ok(row1?.detail.startsWith(want), row1?.detail ?? '');
+  assert.equal(r1.ok, true);
+  const r2 = await run(root, { demo: true });
+  assert.ok(byName(r2, 'Demo pipeline run')?.detail.startsWith(want));
+  // The main workspace database stays empty: the demo writes only to .demo/.
+  const db = openDb(workspaceLayout(r1.workspace).dbPath, { readonly: true });
+  try {
+    assert.equal((db.prepare('SELECT count(*) AS n FROM contacts').get() as { n: number }).n, 0);
+  } finally {
+    db.close();
+  }
 });
 
 test('--demo without fixtures warns but still creates the demo workspace', async () => {
