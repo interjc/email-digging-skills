@@ -36,6 +36,11 @@ export-to-provider (dry-run).
 | D19 | `--demo` runs the whole pipeline on fixtures in a separate workspace `<workspace>/.demo/` (own database), never touching the real database | director |
 | D20 | The `.gitignore` uses `workspace/*` (not `workspace/`) so `!workspace/.gitkeep` works; the requirements' version could not re-include it | director |
 
+| D21 | meta.md: omitted `label`/`exported_at` → null, omitted `consent_basis` → unknown; unknown frontmatter keys → warning; sqlite `table`+`query` → error, neither → the only table or error; a value in both custom consent lists → error | director, T1 questions |
+| D22 | Override files: last entry per key wins (report warns); exclude matches the address before or after an accepted typo | director |
+| D23 | `imports.encoding` = `n/a` for xlsx/sqlite; removed source directories keep their rows (warning) | director |
+| D24 | Masked exports blank non-email personal fields (no synthetic values) and report null rates | director |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
