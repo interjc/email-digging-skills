@@ -5,6 +5,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 ## Status snapshot
 
 <!-- newest first: one entry per recently accepted, committed or in-flight task -->
+- 2026-11-27: one more real source onboarded (add-source, user answered meta.md questions, blocked/suspended users recorded as suppressions by script without reading addresses, dry-run, merge, check-domains --dns --auto-accept). Masked output only; names and counts stay out of the repo.
 - 2026-11-26: T10 done: first real-data merge (sample source first, then all current sources), masked output only. Phase 1 complete. Pending for the user: typo decisions in workspace/overrides/typo-decisions.yaml; new sources go through add-source → meta.md review → dry-run → merge.
 - 2026-11-26: T9 accepted (6b128f2, agy-sha gemini-4-carbon). R5 finding 1 fixed by director (b059e4e), 2–7 deferred on the T8 card. Phase 1 code complete; only T10 part 2 (real data) remains, waiting for the user's go-ahead.
 - 2026-11-26: T0–T7 accepted and committed; T8 committed (306c43f), review R5 running on Codex gpt-leon; T9 running on agy-sha; T10 demo wiring committed (390d928), real-data run waits for T9 + user confirmation.
