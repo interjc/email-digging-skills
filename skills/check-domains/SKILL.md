@@ -10,7 +10,7 @@ description: Sorts undecided domain-typo suspects into obvious and ambiguous buc
 Reads undecided `typo_suspect` contacts (`orphaned_at IS NULL`, not yet in `workspace/overrides/typo-decisions.yaml`) from `database/mail-list.sqlite` and sorts them into two lists:
 
 - **Obvious**: with `--dns`, the typed domain refuses mail (`ENOTFOUND`, null MX per RFC 7505, or non-resolving MX exchanges) **and** the suggested domain accepts mail (MX resolving to A/AAAA, or A/AAAA fallback per RFC 5321 §5.1). Pre-filled with `action: accept` and the DNS evidence in `note`.
-- **Ambiguous**: everything else — including when `--dns` is omitted, when the typed domain accepts mail, when the suggested domain refuses mail, or when any DNS lookup returns a temporary error (`ETIMEOUT`, `ESERVFAIL`, `ECONNREFUSED`). Written with `action: null` and the reason.
+- **Ambiguous**: everything else — including when `--dns` is omitted, when the typed domain accepts mail, when the suggested domain refuses mail, or when the final verdict for either domain is `unknown` (for example every lookup timed out or failed with `ESERVFAIL` / `ECONNREFUSED`; one temporary error is not enough when another MX host of the same domain resolves). Written with `action: null` and the reason.
 
 Prints a masked summary to `stdout` (obvious first, then ambiguous) and writes full, copy-ready entries to `output/reports/domain-check.yaml`. Never modifies `workspace/overrides/` or the database.
 

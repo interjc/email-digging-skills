@@ -52,6 +52,14 @@ export function writeFileInWorkspace(
   if (!isInside(realDir, realWs)) {
     throw new Error(`refusing to write ${name}: ${dir} resolves to ${realDir}, which is outside the workspace ${realWs}`);
   }
+  // R6-1: a symlinked directory inside the workspace (e.g. output/reports -> overrides) stays inside the
+  // workspace but sends the file somewhere else. The directory must resolve to the path it names.
+  const logical = path.resolve(dir);
+  const wsLogical = path.resolve(opts.workspace);
+  const rel = isInside(logical, wsLogical) ? path.relative(wsLogical, logical) : path.relative(realWs, logical);
+  if (path.join(realWs, rel) !== realDir) {
+    throw new Error(`refusing to write ${name}: ${dir} is redirected by a symlink inside the workspace (resolves to ${realDir}); restore the normal workspace layout`);
+  }
   fs.mkdirSync(realDir, { recursive: true });
   const finalDir = fs.realpathSync(realDir);
   if (!isInside(finalDir, realWs)) {

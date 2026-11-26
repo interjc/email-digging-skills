@@ -103,3 +103,21 @@ test('a failed rename removes the temp file (target is a directory)', () => {
   assert.throws(() => writeFileInWorkspace(dir, 'a.md', 'x', { workspace: ws }));
   assert.deepEqual(fs.readdirSync(dir), ['a.md']);
 });
+
+test('R6-1: a symlinked directory inside the workspace (output/reports -> overrides) is refused; nothing is written', () => {
+  const ws = tmp();
+  fs.mkdirSync(path.join(ws, 'overrides'), { recursive: true });
+  fs.mkdirSync(path.join(ws, 'output'), { recursive: true });
+  fs.symlinkSync(path.join(ws, 'overrides'), path.join(ws, 'output', 'reports'));
+  assert.throws(
+    () => writeFileInWorkspace(path.join(ws, 'output', 'reports'), 'domain-check.yaml', 'x', { workspace: ws }),
+    /redirected by a symlink inside the workspace/,
+  );
+  assert.deepEqual(fs.readdirSync(path.join(ws, 'overrides')), []);
+  // A workspace reached through a symlinked path is still fine.
+  const alias = path.join(tmp(), 'ws-link');
+  fs.symlinkSync(ws, alias);
+  fs.mkdirSync(path.join(ws, 'output', 'real'), { recursive: true });
+  writeFileInWorkspace(path.join(alias, 'output', 'real'), 'ok.txt', 'ok', { workspace: alias });
+  assert.equal(fs.readFileSync(path.join(ws, 'output', 'real', 'ok.txt'), 'utf8'), 'ok');
+});

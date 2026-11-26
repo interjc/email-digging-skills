@@ -20,7 +20,7 @@ import { writeFileInWorkspace } from './lib/fsafe.ts';
 import { maskEmail } from './lib/mask.ts';
 import { sanitizeDeep, sanitizeText } from './lib/sanitize.ts';
 import { isProviderDomain } from './lib/email/providers.ts';
-import { classifyDomains, createHostResolver } from './lib/email/dns-check.ts';
+import { canonicalHost, classifyDomains, createHostResolver } from './lib/email/dns-check.ts';
 import type { DnsResolver, DomainClassification } from './lib/email/dns-check.ts';
 
 export const DOMAIN_CHECK_FILE = 'domain-check.yaml';
@@ -71,8 +71,7 @@ function domainOf(email: string | null): string | null {
   if (!email) return null;
   const idx = email.lastIndexOf('@');
   if (idx < 0) return null;
-  const domain = email.slice(idx + 1).trim().toLowerCase();
-  return domain === '' ? null : domain;
+  return canonicalHost(email.slice(idx + 1));
 }
 
 function ambiguousReason(typed: DomainClassification, suggested: DomainClassification): string {

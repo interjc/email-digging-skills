@@ -2,6 +2,7 @@
 // Uses an injected resolver so tests never touch the network. Queries domains only (never local parts).
 
 import { Resolver } from 'node:dns/promises';
+import { domainToASCII } from 'node:url';
 import type { MxRecord } from 'node:dns';
 
 export type MailVerdict = 'accepts' | 'refuses' | 'unknown';
@@ -22,12 +23,25 @@ export function createHostResolver(): DnsResolver {
   return new Resolver({ timeout: 3000, tries: 2 });
 }
 
+const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * Canonical ASCII hostname (lowercase, IDN to punycode, no trailing dot), or null when the value is not a
+ * plain hostname. Anything address-like (`@`, `＠`, spaces) is null, so it can never reach the resolver.
+ */
+export function canonicalHost(value: string): string | null {
+  const trimmed = value.trim().replace(/\.$/, '');
+  if (trimmed === '' || /[@\uFF20\uFE6B\s]/u.test(trimmed)) return null;
+  const ascii = domainToASCII(trimmed);
+  return ascii !== '' && HOSTNAME.test(ascii) ? ascii : null;
+}
+
 function normalizeDomainArg(domain: string): string {
-  const cleaned = domain.trim().toLowerCase().replace(/\.$/, '');
-  if (cleaned === '' || cleaned.includes('@') || /\s/.test(cleaned)) {
+  const host = canonicalHost(domain);
+  if (host === null) {
     throw new Error('DNS check accepts bare domains only, never email addresses or local parts');
   }
-  return cleaned;
+  return host;
 }
 
 function dnsErrorCode(err: unknown): string {
@@ -130,8 +144,12 @@ export async function classifyDomain(domain: string, resolver: DnsResolver): Pro
   let sawNoData = false;
 
   for (const record of ordered) {
-    const exchange = record.exchange.trim().toLowerCase().replace(/\.$/, '');
-    if (exchange === '' || seen.has(exchange)) continue;
+    const exchange = canonicalHost(record.exchange);
+    if (exchange === null) {
+      sawNotFound = true; // an MX target that is not a hostname cannot receive mail; never query it
+      continue;
+    }
+    if (seen.has(exchange)) continue;
     seen.add(exchange);
 
     const probe = await probeAddress(exchange, resolver);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MxRecord } from 'node:dns';
-import { classifyDomain, classifyDomains } from './dns-check.ts';
+import { canonicalHost, classifyDomain, classifyDomains } from './dns-check.ts';
 import type { DnsResolver } from './dns-check.ts';
 
 function dnsErr(code: string): NodeJS.ErrnoException {
@@ -179,4 +179,24 @@ test('classifyDomains deduplicates, caches within the run, and caps concurrency'
   assert.equal(mxCalls.length, 10, 'duplicate and mixed-case domains are queried only once');
   assert.ok(maxActive <= 3, `expected max concurrency <= 3, got ${maxActive}`);
   assert.ok(maxActive >= 2, `expected concurrent execution, got max ${maxActive}`);
+});
+
+test('R6-3/4: canonicalHost blocks address-like names at both resolver boundaries and canonicalizes keys', async () => {
+  assert.equal(canonicalHost('Example.COM.'), 'example.com');
+  assert.equal(canonicalHost('bücher.example'), 'xn--bcher-kva.example');
+  for (const bad of ['a@example.com', 'a＠example.com', 'a﹫example.com', 'a b.example', '-a.example', '', '.']) {
+    assert.equal(canonicalHost(bad), null, bad);
+  }
+  const queried: string[] = [];
+  const resolver = {
+    async resolveMx(h: string) { queried.push(`mx:${h}`); return [{ priority: 10, exchange: 'local@mx.example.com' }]; },
+    async resolve4(h: string) { queried.push(`a:${h}`); return ['192.0.2.1']; },
+    async resolve6(h: string) { queried.push(`aaaa:${h}`); return []; },
+  };
+  const r = await classifyDomain('example.org', resolver);
+  assert.notEqual(r.verdict, 'accepts');
+  assert.ok(queried.every((q) => !q.includes('@')), queried.join(','));
+  await assert.rejects(() => classifyDomain('a＠example.org', resolver));
+  const map = await classifyDomains(['Example.org.', 'example.org'], resolver);
+  assert.deepEqual([...map.keys()], ['example.org']);
 });

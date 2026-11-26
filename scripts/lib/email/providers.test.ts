@@ -74,3 +74,10 @@ test('suggestProvider refuses a candidate that is at OSA distance 1 from another
   // alpha3.com is distance 1 from both alpha1.com and alpha2.com (multiple candidates) -> null
   assert.equal(suggestProvider('alpha3.com', custom), null);
 });
+
+test('R6-2: real mail domains one edit from a provider are never suggested (verified MX)', () => {
+  for (const d of ['kcloud.com', 'scloud.com', 'tcloud.com', 'vcloud.com', 'amail.com', 'fmail.com', 'kmail.com', // email-scan:allow
+    'xmail.com', 'zmail.com', 'boxmail.com', 'mobile.ne.jp', 'nift.com', 'niftys.com', 'outlooks.com']) { // email-scan:allow
+    assert.equal(suggestProvider(d), null, d);
+  }
+});
