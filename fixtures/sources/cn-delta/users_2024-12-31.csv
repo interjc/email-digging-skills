@@ -1,0 +1,9 @@
+邮箱,姓名,注册时间,订阅
+mei.lin@example.com,林梅,2024-06-15,是
+wei.zhang@example.net,张𠀀伟,2024-08-20,否
+hanakosato@example.com,佐藤花子,2024-09-10,是
+saki.watanabe@example.co.jo,渡边早纪,2024-10-05,是
+chen.li@example.org,李晨,2024-11-01,
+  Chen.Li@Example.ORG  ,李晨,2024-11-12,是
+double@@example.com,无效测试,2024-12-01,否
+   ,空白邮箱,2024-12-15,

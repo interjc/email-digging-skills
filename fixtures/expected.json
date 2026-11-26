@@ -1,0 +1,207 @@
+{
+  "sources": {
+    "shop-alpha": {
+      "files": {
+        "members_2025-03-01.csv": {
+          "rows_read": 10,
+          "empty": 1,
+          "invalid": 1,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 1,
+          "typo_suspect": 0
+        },
+        "members_2025-09-01.csv": {
+          "rows_read": 7,
+          "empty": 0,
+          "invalid": 0,
+          "cells_split": 1,
+          "dup_in_file": 1,
+          "role": 0,
+          "typo_suspect": 1
+        }
+      },
+      "unique_emails": 14
+    },
+    "cn-delta": {
+      "files": {
+        "users_2024-12-31.csv": {
+          "rows_read": 8,
+          "empty": 1,
+          "invalid": 1,
+          "cells_split": 0,
+          "dup_in_file": 1,
+          "role": 0,
+          "typo_suspect": 0
+        }
+      },
+      "unique_emails": 5
+    },
+    "export-epsilon": {
+      "files": {
+        "contacts_2025-06-30.txt": {
+          "rows_read": 6,
+          "empty": 0,
+          "invalid": 1,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 1,
+          "typo_suspect": 1
+        }
+      },
+      "unique_emails": 5
+    },
+    "zeta-signup": {
+      "files": {
+        "signup_2025-01-15.csv": {
+          "rows_read": 6,
+          "empty": 1,
+          "invalid": 1,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 0,
+          "typo_suspect": 0
+        },
+        "extra_2025-01-15.json": {
+          "rows_read": 3,
+          "empty": 0,
+          "invalid": 0,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 0,
+          "typo_suspect": 0
+        }
+      },
+      "unique_emails": 6
+    },
+    "event-beta": {
+      "files": {
+        "attendees_2023-11-03.xlsx": {
+          "rows_read": 5,
+          "empty": 0,
+          "invalid": 1,
+          "cells_split": 0,
+          "dup_in_file": 1,
+          "role": 0,
+          "typo_suspect": 0
+        },
+        "walkin_2023-11-03.csv": {
+          "rows_read": 3,
+          "empty": 0,
+          "invalid": 0,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 1,
+          "typo_suspect": 0
+        }
+      },
+      "unique_emails": 6
+    },
+    "app-gamma": {
+      "files": {
+        "app_2025-08-01.db": {
+          "rows_read": 6,
+          "empty": 1,
+          "invalid": 0,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 0,
+          "typo_suspect": 0
+        }
+      },
+      "unique_emails": 5
+    },
+    "form-eta": {
+      "files": {
+        "responses_2025-07-01.csv": {
+          "rows_read": 5,
+          "empty": 0,
+          "invalid": 0,
+          "cells_split": 0,
+          "dup_in_file": 0,
+          "role": 0,
+          "typo_suspect": 0
+        }
+      },
+      "unique_emails": 5
+    }
+  },
+  "after_overrides": {
+    "excluded": 1,
+    "typo_accepted": 1
+  },
+  "cross_source_dups": 6,
+  "contacts_total": 36,
+  "overlap": [
+    {
+      "a": "app-gamma",
+      "b": "cn-delta",
+      "contacts": 1
+    },
+    {
+      "a": "app-gamma",
+      "b": "event-beta",
+      "contacts": 1
+    },
+    {
+      "a": "app-gamma",
+      "b": "export-epsilon",
+      "contacts": 1
+    },
+    {
+      "a": "app-gamma",
+      "b": "form-eta",
+      "contacts": 1
+    },
+    {
+      "a": "app-gamma",
+      "b": "shop-alpha",
+      "contacts": 2
+    },
+    {
+      "a": "app-gamma",
+      "b": "zeta-signup",
+      "contacts": 1
+    },
+    {
+      "a": "cn-delta",
+      "b": "zeta-signup",
+      "contacts": 2
+    },
+    {
+      "a": "event-beta",
+      "b": "export-epsilon",
+      "contacts": 1
+    },
+    {
+      "a": "event-beta",
+      "b": "form-eta",
+      "contacts": 1
+    },
+    {
+      "a": "event-beta",
+      "b": "shop-alpha",
+      "contacts": 2
+    },
+    {
+      "a": "event-beta",
+      "b": "zeta-signup",
+      "contacts": 1
+    },
+    {
+      "a": "export-epsilon",
+      "b": "form-eta",
+      "contacts": 1
+    },
+    {
+      "a": "export-epsilon",
+      "b": "shop-alpha",
+      "contacts": 1
+    },
+    {
+      "a": "form-eta",
+      "b": "shop-alpha",
+      "contacts": 1
+    }
+  ]
+}

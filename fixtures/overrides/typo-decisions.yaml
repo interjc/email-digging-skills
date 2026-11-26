@@ -1,0 +1,8 @@
+- email: hiroshi.tanaka@example.con
+  action: accept
+  suggested: hiroshi.tanaka@example.com
+  note: Confirmed typo with customer
+- email: saki.watanabe@example.co.jo
+  action: reject
+  suggested: saki.watanabe@example.co.jp
+  note: Verified intentional test domain

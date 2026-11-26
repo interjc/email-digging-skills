@@ -1,0 +1,14 @@
+[
+  {
+    "mail": "sora.kimura@example.jp",
+    "name": "Sora Kimura"
+  },
+  {
+    "mail": "wei.zhang@example.net",
+    "name": "Wei Zhang"
+  },
+  {
+    "mail": "mailto:aiko.noda@example.org",
+    "name": "Aiko Noda"
+  }
+]
