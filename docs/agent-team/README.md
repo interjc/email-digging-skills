@@ -17,9 +17,9 @@ The director (L1) maintains this file. Each card under `tasks/` has exactly one 
 |---|---|---|---|---|
 | [T0](tasks/T0.md) | Contracts: types, migrations, config templates, AGENTS.md, design doc | solo | director | committed |
 | [T1](tasks/T1.md) | Spec docs: schema, cleaning-rules, consent-policy, masking, meta-template | outsource | director | committed |
-| [T2](tasks/T2.md) | Email normalization module + rule tables + tests | outsource | director | in-progress |
-| [T3](tasks/T3.md) | Masking module, staged-email scan, git hook, CI | outsource | director | in-progress |
-| [T4](tasks/T4.md) | Synthetic fixtures + generator | outsource | director | in-progress |
+| [T2](tasks/T2.md) | Email normalization module + rule tables + tests | outsource | director | committed |
+| [T3](tasks/T3.md) | Masking module, staged-email scan, git hook, CI | outsource | director | committed |
+| [T4](tasks/T4.md) | Synthetic fixtures + generator | outsource | director | committed |
 | [T5](tasks/T5.md) | Workspace, config, env, overrides, db + init-workspace CLI | direct | in-house sonnet-5.5 · high | committed |
 | [T6](tasks/T6.md) | Probe, decode, read, column detect, staging + add-source CLI | direct | in-house sonnet-5.5 · high | in-progress |
 | [T7](tasks/T7.md) | Merge into SQLite, reports, clean-and-merge + review-report CLIs | designed | director | planned |
