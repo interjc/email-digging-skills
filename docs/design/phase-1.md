@@ -46,6 +46,8 @@ export-to-provider (dry-run).
 | D27 | Guard criterion for an in-repo workspace: `git ls-files` lists nothing under the workspace, `git status --porcelain --untracked-files=all` shows nothing under it (every existing file is ignored), and the not-yet-existing probe paths are ignored; every layout directory is resolved with realpath and checked the same way when it lands inside the repo (symlinks); "inside" uses path.relative, not a string prefix | director, R1 finding 1 |
 | D28 | Anything printed or thrown (headers, samples of any field, error messages, YAML parse errors) goes through `sanitizeText`, which masks every address-like substring; non-email samples are additionally masked by field | director, R1 finding 2 |
 
+| D29 | Accepted limitations after review R2 (documented, not fixed in phase 1): xlsx data beyond column ZZ is not read (the width scan stops there; the probe warns when column ZZ is non-empty); backup retention assumes a monotonic clock; two `init-workspace` runs at the same time against one repository can race on the repo-level `.env`/`config.yaml` (init is a one-time human step); a lock file left behind by a crash or a failed lock write is reported as stale and removed by the human | director, R2 |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
