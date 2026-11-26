@@ -1,6 +1,7 @@
 import domainTypos from '../rules/domain-typos.json' with { type: 'json' };
 import roleLocals from '../rules/role-locals.json' with { type: 'json' };
 import type { EmailCandidate, Flag, NormalizeEmailCell, RejectReason } from '../types.ts';
+import { suggestProvider } from './providers.ts';
 
 const ROLE_LOCALS = new Set(roleLocals);
 const EXACT_TYPOS = new Map(Object.entries(domainTypos.exact));
@@ -98,6 +99,10 @@ function suggestTypo(local: string, domain: string): string | null {
   for (const [suffix, correction] of SUFFIX_TYPOS) {
     if (domain.endsWith(suffix)) return `${local}@${domain.slice(0, -suffix.length)}${correction}`;
   }
+
+  const provider = suggestProvider(domain);
+  if (provider !== null) return `${local}@${provider}`;
+
   return null;
 }
 

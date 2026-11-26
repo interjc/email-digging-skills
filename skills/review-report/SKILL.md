@@ -40,7 +40,7 @@ Exit codes: `0` ok; `1` unexpected runtime error; `2` missing workspace, missing
 
 ## Human decisions and where they live
 
-- **Typo suspects** → human reviews `output/reports/pending-decisions.yaml` locally and moves chosen entries into `workspace/overrides/typo-decisions.yaml` with `action: accept` (replaces normalized email on next merge, preserves `raw_email`, adds `typo_accepted`) or `action: reject`.
+- **Typo suspects** → optionally run [`check-domains`](../check-domains/SKILL.md) (`node scripts/check-domains.ts --dns`) to sort undecided suspects into `obvious` and `ambiguous` in `output/reports/domain-check.yaml`; the human then reviews `output/reports/pending-decisions.yaml` (or `domain-check.yaml`) locally and moves chosen entries into `workspace/overrides/typo-decisions.yaml` with `action: accept` (replaces normalized email on next merge, preserves `raw_email`, adds `typo_accepted`) or `action: reject`.
 - **Encodings, column mappings, and `consent_basis`** → human updates `workspace/resources/<source>/meta.md`.
 - **Sources without `meta.md`** → run `add-source <name>`.
 - **Suppressions, consent overrides, and exclusions** → `workspace/overrides/{suppressions,consents,exclude}.yaml`.

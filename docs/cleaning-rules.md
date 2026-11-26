@@ -62,10 +62,17 @@ SQLite inputs do not have a resolved text encoding.
    [`scripts/lib/rules/role-locals.json`](../scripts/lib/rules/role-locals.json). If it
    matches (for example `info` or `support`), flag `role_address` and set status `role`.
    Do not discard role addresses.
-8. Look up the domain in
-   [`scripts/lib/rules/domain-typos.json`](../scripts/lib/rules/domain-typos.json) and check
-   the suffix rules below. A match yields status and flag `typo_suspect` and suggests the
-   same local part with the corrected domain. Do not apply the correction automatically.
+8. Flag suspected domain typos in three offline steps (first match wins):
+   - Exact domain table in [`scripts/lib/rules/domain-typos.json`](../scripts/lib/rules/domain-typos.json).
+   - Suffix rules below (`.co.jo`, `.ne.jo`, `.or.jo`, `.con`, `.cmo`, `.comm`, `.nett`).
+   - Curated provider-distance matching in [`scripts/lib/email/providers.ts`](../scripts/lib/email/providers.ts)
+     against [`scripts/lib/rules/providers.json`](../scripts/lib/rules/providers.json): skip any domain already
+     in `providers` or `known_real`; find providers at Damerau-Levenshtein (Optimal String Alignment) distance
+     exactly `1` from the full domain; suggest only when there is a single candidate, that candidate is not at
+     distance `1` from any other provider, the label count matches, and the first differing label has at least
+     `5` characters in the candidate.
+   A match yields status and flag `typo_suspect` and suggests the same local part with the corrected domain.
+   Do not apply any correction automatically.
 
 Syntax: exactly one `@`, total length at most 254 characters, and a local part of 1–64
 characters from this set:
@@ -82,6 +89,17 @@ Suffix suggestions: `.co.jo` → `.co.jp`, `.ne.jo` → `.ne.jp`, `.or.jo` → `
 `.con` / `.cmo` / `.comm` → `.com`, and `.nett` → `.net`. For example, `member@example.con`
 suggests `member@example.com`. Status precedence is `typo_suspect`, then `role`, then
 `valid`; keep both flags when both rules match.
+
+Optional DNS triage (`node scripts/check-domains.ts [--dns]`): reads undecided `typo_suspect`
+contacts and writes `output/reports/domain-check.yaml` without touching `workspace/overrides/`.
+Without `--dns`, no network calls are made and every suspect is listed as **ambiguous**. With
+`--dns`, bare domains (never local parts) are queried through the host's DNS resolver per
+RFC 5321 §5.1 (MX, falling back to A/AAAA on `ENODATA`) and RFC 7505 (null MX `0 .` refuses).
+A suspect is **obvious** (pre-filled `action: accept` with DNS evidence in `note`) only when
+the typed domain refuses mail and the suggested domain accepts mail; all other cases (typed
+domain accepts mail, suggested domain refuses, or temporary DNS errors such as `ETIMEOUT` /
+`ESERVFAIL` / `ECONNREFUSED`) are **ambiguous** (`action: null` with the reason). A human still
+decides every fix by copying agreed entries into `workspace/overrides/typo-decisions.yaml`.
 
 ## Dates
 

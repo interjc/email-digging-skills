@@ -86,6 +86,7 @@ node scripts/export.ts --workspace workspace/.demo --provider listmonk
 | 2 | [`add-source`](skills/add-source/SKILL.md) | `node scripts/add-source.ts <name>` | 创建或探测 `workspace/resources/<name>/`，识别编码、列映射与疑似重复文件，生成 `meta.md` 草稿（绝不覆盖已有 `meta.md`）。 |
 | 3 | [`clean-and-merge`](skills/clean-and-merge/SKILL.md) | `node scripts/clean-and-merge.ts [--dry-run]` | 将各来源清洗暂存为 Parquet，应用 `workspace/overrides/*.yaml`，自动备份主库后单事务合并联系人与同意状态，并输出脱敏报告。 |
 | 4 | [`review-report`](skills/review-report/SKILL.md) | `node scripts/review-report.ts` | 输出脱敏的待人工确认项（拼写建议、自动检测编码、低置信度列映射、`unknown` 同意依据），并在本地生成 `output/reports/pending-decisions.yaml`。 |
+| 4b | [`check-domains`](skills/check-domains/SKILL.md) | `node scripts/check-domains.ts [--dns]` | 将未裁决的疑似拼错域名分类为 `obvious` 与 `ambiguous`（可选 `--dns` 通过本机解析器检查），并在本地生成可直接复制审阅的 `output/reports/domain-check.yaml`（不写入 `overrides/`）。 |
 | 5 | [`query-list`](skills/query-list/SKILL.md) | `node scripts/query.ts --preset <name>` / `--sql "<SELECT …>"` | 对主库执行只读脱敏查询（内置 `sources`、`overlap`、`only-in`、`sendable`、`domains`、`status`、`consent`、`orphaned` 或自定义 `SELECT`），支持 `--out` 导出本地 CSV。 |
 | 6 | [`mask-data`](skills/mask-data/SKILL.md) | `node scripts/mask-data.ts [--hash-domain] [--shape]` | 在 `workspace/output/masked/` 下生成 HMAC 假名化的 SQLite 副本（`mail-list-masked.sqlite`）及可选的数据形状摘要 `shape.json`。 |
 | 7 | [`export-to-provider`](skills/export-to-provider/SKILL.md) | `node scripts/export.ts --provider listmonk` | 在 `workspace/output/exports/` 下生成 Listmonk 本地 dry-run 导入 CSV（默认使用 `strict` 严格名单）并记录 `sync_log`。 |

@@ -201,7 +201,7 @@ export function renderReviewSummary(r: ReviewResult): string {
     for (const i of items.slice(0, SHOW)) L.push(`  - ${i}`);
     if (items.length > SHOW) L.push(`  ... and ${items.length - SHOW} more (see the pending file)`);
   };
-  section('Typo suspects without a decision', p.typo_decisions.map((t) => `${maskEmail(t.email)} → ${t.suggested ? maskEmail(t.suggested) : '?'} (${t.sources.join(', ')})`), 'accept or reject in overrides/typo-decisions.yaml');
+  section('Typo suspects without a decision', p.typo_decisions.map((t) => `${maskEmail(t.email)} → ${t.suggested ? maskEmail(t.suggested) : '?'} (${t.sources.join(', ')})`), 'accept or reject in overrides/typo-decisions.yaml (run check-domains --dns to sort them)');
   section('Encodings to confirm', p.encodings.map((e) => `${e.source}/${e.file}: ${e.detected ?? 'n/a'} (candidates: ${e.candidates.join(', ')})`), 'write `encoding:` in meta.md');
   section('Column mappings below 0.8', p.low_confidence_mappings.map((m) => `${m.source}/${m.file}: ${m.field} ← "${m.column}" (${m.how}, ${m.confidence})`), 'confirm or set `columns.<field>` in meta.md');
   section('Sources without meta.md', p.sources_without_meta, 'run add-source <name>');

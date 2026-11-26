@@ -160,3 +160,35 @@ test('preserves Gmail dot and plus-tag variants as distinct addresses', () => {
   const variants = ['normalizer.test123@gmail.com', 'normalizertest123@gmail.com', 'normalizer.test123+fixture@gmail.com']; // email-scan:allow
   assert.deepEqual(normalizeEmailCell(variants.join(';')), variants.map((raw) => accepted(raw, raw, 'valid', ['split_from_multi'])));
 });
+
+test('falls back to offline provider-distance suggestions while keeping table rules and traps intact', () => {
+  // Exact table typos stay handled by domain-typos.json (including gmail.co)
+  for (const [wrong, right] of [
+    ['a@gmail.co', 'a@gmail.com'], // email-scan:allow
+    ['a@gmial.com', 'a@gmail.com'], // email-scan:allow
+    ['a@gmaill.com', 'a@gmail.com'], // email-scan:allow
+    ['a@outlool.com', 'a@outlook.com'], // email-scan:allow
+    ['a@hotmal.com', 'a@hotmail.com'], // email-scan:allow
+    ['a@icluod.com', 'a@icloud.com'], // email-scan:allow
+    ['a@foxmial.com', 'a@foxmail.com'], // email-scan:allow
+  ] as const) {
+    assert.deepEqual(normalizeEmailCell(wrong), [accepted(wrong, wrong, 'typo_suspect', ['typo_suspect'], right)]);
+  }
+
+  // Known-real domains, curated providers, short/ambiguous domains, and distance-2 domains stay valid
+  for (const raw of [
+    'a@mail.com', // email-scan:allow
+    'a@email.com', // email-scan:allow
+    'a@126.com', // email-scan:allow
+    'a@163.com', // email-scan:allow
+    'a@123.com', // email-scan:allow
+    'a@sina.cn', // email-scan:allow
+    'a@q.com', // email-scan:allow
+    'a@yahoo.co.jp', // email-scan:allow
+    'a@yahoo.com', // email-scan:allow
+    'a@docomo.ne.jp', // email-scan:allow
+    'a@gmailll.com', // email-scan:allow
+  ]) {
+    assert.deepEqual(normalizeEmailCell(raw), [accepted(raw, raw, 'valid')]);
+  }
+});
