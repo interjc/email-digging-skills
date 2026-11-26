@@ -1,6 +1,6 @@
 # Common rules for every brief (read first)
 
-Repository: /Users/mo/dev/email-digging-skills, branch main @ c444d93. Several agents work in this
+Repository: /Users/mo/dev/email-digging-skills, branch main (check HEAD with git log). Several agents work in this
 checkout at the same time, each on its own file lease. Other files changing under you is expected.
 
 Read before coding: `AGENTS.md`, `docs/design/phase-1.md` (decisions D1–D20, module map, interfaces,
