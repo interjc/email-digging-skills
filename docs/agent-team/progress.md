@@ -41,3 +41,4 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 
 | Location | What it is | Why it is this way | Guidance |
 |---|---|---|---|
+- 2026-11-26: T5+T6 rework round 3 accepted and committed (ea54dc5). Waiting on T7 round 3 and T8.
