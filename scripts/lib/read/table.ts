@@ -182,7 +182,16 @@ export async function openTable(file: string, format: FileFormat, meta: MetaFile
         }
         from = `${alias}.main.${sqlIdent(table)}`;
       }
-      const described = (await (await conn.runAndReadAll(`SELECT column_name FROM (DESCRIBE SELECT * FROM ${from})`)).getRows()).map((r) => String(r[0]));
+      let described: string[];
+      try {
+        described = (await (await conn.runAndReadAll(`SELECT column_name FROM (DESCRIBE SELECT * FROM ${from})`)).getRows()).map((r) => String(r[0]));
+      } catch (err) {
+        // D32: DuckDB cannot represent a result with two columns of the same name; refuse with the fix.
+        if (/duplicate column name/i.test((err as Error).message)) {
+          throw new Error('the query returns duplicate column names; give every column a unique alias');
+        }
+        throw err;
+      }
       const select = described.map((c) => `CAST(${sqlIdent(c)} AS VARCHAR)`).join(', ');
       const rows = streamRows(conn, `SELECT ${select} FROM ${from}`);
       return { headers: uniqueHeaders(described), rows, close };

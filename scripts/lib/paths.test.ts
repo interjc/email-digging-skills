@@ -227,7 +227,7 @@ test('guard: an external workspace whose resources is a symlink into the checkou
   fs.symlinkSync(path.join(root, 'data'), path.join(outside, 'resources'));
   const safety = checkWorkspaceSafety(outside, root);
   assert.equal(safety.insideRepo, true);
-  assert.match(safety.problems.join(' '), /resources resolves into the repository/);
+  assert.match(safety.problems.join(' '), /resources resolves into the repository or another git checkout/);
   assert.throws(
     () => requireWorkspace({ repoRoot: root, workspace: outside, env: {} }),
     (err: unknown) => err instanceof PreconditionError && /not git-ignored/.test(err.message),
@@ -407,4 +407,72 @@ test('assertPathSafe: git unusable although .git exists -> refuses; no .git anyw
   assert.throws(() => assertPathSafe(path.join(broken, 'workspace'), { repoRoot: broken }), /cannot be verified/);
   const plain = makeRepo({ git: false });
   assertPathSafe(path.join(plain, 'anything'), { repoRoot: plain });
+});
+
+// --- round 3 (review R4) ---------------------------------------------------------------------------
+
+test('R4-1a: a dangling .git symlink (git rev-parse exits 128) refuses; it is not "no git"', () => {
+  const root = makeRepo({ git: false });
+  fs.symlinkSync(path.join(root, 'no-such-git-dir'), path.join(root, '.git')); // dangling
+  assert.equal(fs.existsSync(path.join(root, '.git')), false, 'existsSync cannot see a dangling symlink');
+  initLayout(path.join(root, 'workspace'));
+  const safety = checkWorkspaceSafety(path.join(root, 'workspace'), root);
+  assert.equal(safety.warnings.filter((w) => /not a git repository/.test(w)).length, 0);
+  assert.match(safety.problems.join(' '), /cannot be verified/);
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), (err: unknown) => err instanceof PreconditionError && /cannot be verified/.test(err.message));
+  assert.throws(() => assertPathSafe(path.join(root, 'workspace', 'resources', 'shop'), { repoRoot: root }), /cannot be verified/);
+});
+
+test('R4-1a: a dangling .git deeper than a valid checkout (git skips it) still refuses', () => {
+  const outer = makeRepo(); // valid checkout, workspace/* ignored
+  const inner = path.join(outer, 'pkg');
+  fs.mkdirSync(inner);
+  fs.writeFileSync(path.join(inner, 'package.json'), '{}\n');
+  fs.symlinkSync(path.join(inner, 'missing'), path.join(inner, '.git'));
+  initLayout(path.join(inner, 'workspace'));
+  assert.match(checkWorkspaceSafety(path.join(inner, 'workspace'), inner).problems.join(' '), /cannot be verified/);
+});
+
+test('R4-1b: a workspace that is a sibling of the package inside an ancestor git checkout is checked there', () => {
+  const outer = makeRepo({ gitignore: false });
+  const pkg = path.join(outer, 'pkg'); // "this repository": a package directory without its own .git
+  fs.mkdirSync(pkg);
+  fs.writeFileSync(path.join(pkg, 'package.json'), '{}\n');
+  const ws = path.join(outer, 'ws-sibling'); // outside pkg, inside the ancestor checkout
+  initLayout(ws);
+
+  // not ignored in the ancestor checkout: refused
+  assert.equal(checkWorkspaceSafety(ws, pkg).insideRepo, true);
+  assert.throws(
+    () => requireWorkspace({ repoRoot: pkg, workspace: ws, env: {} }),
+    (err: unknown) => err instanceof PreconditionError && /not git-ignored/.test(err.message),
+  );
+
+  // ignored in the ancestor checkout: fine
+  fs.writeFileSync(path.join(outer, '.gitignore'), 'ws-sibling/\n');
+  const info = requireWorkspace({ repoRoot: pkg, workspace: ws, env: {} });
+  assert.equal(info.workspace, ws);
+
+  // a tracked file there: refused again
+  execFileSync('git', ['add', '-f', 'ws-sibling/resources'], { cwd: outer, stdio: 'ignore' });
+  write(path.join(ws, 'resources', 'tracked.txt'));
+  execFileSync('git', ['add', '-f', 'ws-sibling/resources/tracked.txt'], { cwd: outer });
+  assert.throws(() => requireWorkspace({ repoRoot: pkg, workspace: ws, env: {} }), /tracked by git/);
+});
+
+test('R4-1b: assertPathSafe applies to whatever checkout contains the path, not only this repository', () => {
+  const outer = makeRepo({ gitignore: false });
+  const pkg = path.join(outer, 'pkg');
+  fs.mkdirSync(pkg);
+  fs.writeFileSync(path.join(pkg, 'package.json'), '{}\n');
+  const dir = path.join(outer, 'elsewhere', 'src');
+  fs.mkdirSync(dir, { recursive: true });
+  assert.throws(
+    () => assertPathSafe(dir, { repoRoot: pkg, what: 'The source directory' }),
+    (err: unknown) => err instanceof PreconditionError && /^The source directory/.test(err.message) && /not git-ignored/.test(err.message),
+  );
+  fs.writeFileSync(path.join(outer, '.gitignore'), 'elsewhere/\n');
+  assertPathSafe(dir, { repoRoot: pkg });
+  // outside every checkout: passes
+  assertPathSafe(path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-free-'))), 'x'), { repoRoot: pkg });
 });

@@ -313,3 +313,16 @@ test('R2-3b (D29): xlsx data in column ZZ warns that columns beyond ZZ are not r
   await probeFile(narrow, mf('narrow.xlsx'), { onWarning: (m) => none.push(m) });
   assert.deepEqual(none, []);
 });
+
+test('R4-6 (D32): a SQLite query with duplicate column names is refused with a message asking for unique aliases', async () => {
+  const dir = tmpDir();
+  const f = path.join(dir, 'dup.db');
+  await writeSqlite(f, 'people', ['mail', 'other'], [['a@example.com', 'x']]);
+  const message = 'the query returns duplicate column names; give every column a unique alias';
+  for (const query of ['select mail as email, other as email from people', 'select mail, mail from people', 'select p.mail, q.mail from people p join people q on 1=1']) {
+    await assert.rejects(probeFile(f, mf('dup.db', { query })), (err: Error) => err.message === message, query);
+  }
+  // with aliases it works
+  const ok = await probeFile(f, mf('dup.db', { query: 'select mail as email, other as other_col from people' }));
+  assert.deepEqual(ok.headers, ['email', 'other_col']);
+});

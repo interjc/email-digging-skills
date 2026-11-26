@@ -117,3 +117,31 @@ test('printWarnings masks addresses', () => {
   }
   assert.equal(chunks.join(''), 'Warning: odd file l***@e***e.com\n');
 });
+
+// --- round 3 (review R4) ---------------------------------------------------------------------------
+
+import { containsAddress } from './sanitize.ts';
+
+test('containsAddress: the same detection as sanitizeText, NFKC-aware', () => {
+  for (const t of ['taro@example.com', 'x leak﹫example.com y', 'Ｔａｒｏ＠ｅｘａｍｐｌｅ．ｃｏｍ', 'mailto:a@example.org', 'secret@', '＠host']) {
+    assert.equal(containsAddress(t), true, t);
+    assert.notEqual(sanitizeText(t), t, t);
+  }
+  for (const t of ['', 'plain text', 'column 3', 't***@e***e.com', '***', 'price 5 at shop']) {
+    assert.equal(containsAddress(t), false, t);
+  }
+});
+
+import { sanitizeDeep } from './sanitize.ts';
+
+test('sanitizeDeep masks values and keys recursively, keeps structure, and its serialization parses', () => {
+  const input = { dir: '@pending', list: ['a@example.com', 3, null, true, { 'k@example.org': 'x' }], n: 1 };
+  const out = sanitizeDeep(input);
+  const json = JSON.stringify(out);
+  assert.doesNotThrow(() => JSON.parse(json));
+  assert.ok(!json.includes('a@example') && !json.includes('k@example') && !json.includes('@pending'), json);
+  assert.deepEqual(Object.keys(out), ['dir', 'list', 'n']);
+  assert.equal((out.list as unknown[])[1], 3);
+  assert.equal((out.list as unknown[])[2], null);
+  assert.equal(input.dir, '@pending', 'the input is not mutated');
+});

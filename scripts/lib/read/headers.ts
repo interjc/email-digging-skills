@@ -1,10 +1,11 @@
 // Headers as they may be printed (D28). A header row that contains an address is almost certainly a
 // data row (wrong header_row), so none of its text is printed.
 
-import { sanitizeText } from '../sanitize.ts';
+import { containsAddress, sanitizeText } from '../sanitize.ts';
 
 export function headerHasAddress(headers: string[]): boolean {
-  return headers.some((h) => h.includes('@') || h.includes('＠'));
+  // containsAddress is NFKC-aware (＠ U+FF20 and ﹫ U+FE6B fold to '@'): the detection sanitizeText uses
+  return headers.some(containsAddress);
 }
 
 /** `<col N>` (1-based) for every header when one looks like an address; else sanitized and shortened to 60 characters. */

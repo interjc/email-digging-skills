@@ -457,3 +457,70 @@ test('R2-3b (D29): add-source reports xlsx columns beyond ZZ as a warning', asyn
   const { report } = await addSource('shop-a', { workspace: ws });
   assert.ok(report.warnings.includes('wide.xlsx: columns beyond ZZ are not read'), report.warnings.join(' | '));
 });
+
+// ---------------------------------------------------------------------------
+// Review R4 rework
+// ---------------------------------------------------------------------------
+
+import { execFileSync } from 'node:child_process';
+
+test('R4-4: a symlink at meta.draft.md is replaced, never followed (tracked file in a temp checkout stays unchanged)', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'a.csv', 'Email\na@example.com\n');
+  const original = '---\nsource: shop-a\nkind: other\nfiles:\n  - name: a.csv\n---\nhand written\n';
+  fs.writeFileSync(path.join(dir, 'meta.md'), original); // meta.md exists, so the draft path is used
+
+  // a temp checkout with a tracked file; the draft path points at it
+  const checkout = tmpDir('t6-checkout-');
+  const git = (...args: string[]) => execFileSync('git', ['-C', checkout, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { stdio: 'pipe' });
+  git('init', '-q');
+  fs.writeFileSync(path.join(checkout, 'tracked.txt'), 'precious tracked content\n');
+  git('add', 'tracked.txt');
+  git('commit', '-q', '-m', 'init');
+  fs.symlinkSync(path.join(checkout, 'tracked.txt'), path.join(dir, 'meta.draft.md'));
+
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.equal(report.meta_file, path.join(dir, 'meta.draft.md'));
+  assert.equal(fs.readFileSync(path.join(checkout, 'tracked.txt'), 'utf8'), 'precious tracked content\n');
+  assert.equal(git('status', '--porcelain').toString(), '');
+  assert.ok(!fs.lstatSync(path.join(dir, 'meta.draft.md')).isSymbolicLink()); // replaced by a regular file
+  assert.match(fs.readFileSync(path.join(dir, 'meta.draft.md'), 'utf8'), /name: a\.csv/);
+  assert.equal(fs.readFileSync(path.join(dir, 'meta.md'), 'utf8'), original);
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), []); // no temp file left
+});
+
+test('R4-4: a dangling symlink at meta.md is never followed either (exclusive create fails, the draft is written)', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'a.csv', 'Email\na@example.com\n');
+  const target = path.join(tmpDir('t6-target-'), 'victim.md');
+  fs.symlinkSync(target, path.join(dir, 'meta.md')); // dangling
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.equal(fs.existsSync(target), false);
+  assert.equal(report.meta_is_draft, true);
+});
+
+test('R4-5: files[].probe.file is sanitized in the JSON output (a readable file whose name holds an address)', async () => {
+  const { ws, resources } = workspace();
+  writeFile(path.join(resources, 'shop-a'), 'leak.person@example.com.csv', 'Email\na@example.com\n'); // email-scan:allow
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.ok(report.files[0]?.probe);
+  assert.doesNotMatch(report.files[0]!.probe!.file, /leak\.person@example\.com/);
+  assert.doesNotMatch(report.files[0]!.file, /leak\.person@example\.com/);
+  const json = spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws, '--json'], { cwd: repo, encoding: 'utf8' });
+  assert.equal(json.status, 0, json.stderr);
+  assert.doesNotMatch(json.stdout + json.stderr, /leak\.person@example\.com|leak\.person@/);
+  const parsed = JSON.parse(json.stdout) as { files: Array<{ file: string; probe: { file: string } }> };
+  assert.match(parsed.files[0]!.probe.file, /\*\*\*/);
+});
+
+test('R4-5: a header with a small commercial at (U+FE6B) counts as an address: every header is <col N>, with the confirm line', async () => {
+  const { ws, resources } = workspace();
+  writeFile(path.join(resources, 'shop-a'), 'a.csv', 'hanako.yamada﹫example.jp,Hanako Yamada,Created\nx,y,z\n');
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.deepEqual(report.files[0]?.probe?.headers, ['<col 1>', '<col 2>', '<col 3>']);
+  assert.match(report.confirm.join('\n'), /a header cell contains an address; the header row may be wrong/);
+  const out = spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws, '--json'], { cwd: repo, encoding: 'utf8' });
+  assert.doesNotMatch(out.stdout, /hanako|Hanako Yamada|yamada/i);
+});

@@ -17,6 +17,7 @@ import { findDuplicates } from './lib/read/duplicates.ts';
 import { REVIEW_THRESHOLD } from './lib/read/synonyms.ts';
 import { maskValue } from './lib/mask.ts';
 import { sanitizeError, sanitizeText } from './lib/sanitize.ts';
+import { writeFileInWorkspace } from './lib/fsafe.ts';
 import { headerHasAddress, printableHeaders } from './lib/read/headers.ts';
 import { withWorkspaceLock } from './lib/lock.ts';
 import { makeConsentMatcher } from './lib/read/consent.ts';
@@ -100,6 +101,7 @@ function printableProbe(p: FileProbe): FileProbe {
   const headers = printableHeaders(p.headers);
   return {
     ...p,
+    file: sanitizeText(p.file), // R4-5: the file name can hold an address too
     headers,
     mappings: p.mappings.map((m) => ({ ...m, column: m.column === null ? null : (headers[p.headers.indexOf(m.column)] ?? '<col ?>') })),
   };
@@ -243,7 +245,8 @@ async function addSourceLocked(name: string, layout: ReturnType<typeof workspace
           try { existing = loadMeta(dir); } catch { /* keep defaults */ }
         }
         const draftPath = path.join(dir, 'meta.draft.md');
-        fs.writeFileSync(draftPath, render(existing));
+        // R4-4: meta.draft.md may exist (even as a symlink): replace it through a temp file, never follow it.
+        writeFileInWorkspace(dir, 'meta.draft.md', render(existing), { workspace: layout.workspace });
         report.meta_file = draftPath;
         report.meta_is_draft = true;
       }

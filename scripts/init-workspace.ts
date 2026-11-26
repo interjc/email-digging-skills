@@ -12,7 +12,7 @@ import { PreconditionError } from './lib/errors.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
 import { parseEnv, setEnvValue } from './lib/env.ts';
 import { withWorkspaceLock } from './lib/lock.ts';
-import { sanitizeError } from './lib/sanitize.ts';
+import { sanitizeDeep, sanitizeError } from './lib/sanitize.ts';
 import { openDb, migrate } from './lib/db.ts';
 import {
   SAFETY_FIX, checkWorkspaceSafety, layoutDirs, repoRoot, resolveWorkspace, workspaceLayout,
@@ -323,6 +323,17 @@ function renderTable(result: InitResult): string {
   return [fmt(header), widths.map((w) => '-'.repeat(w)).join('  '), ...rows.map(fmt)].join('\n');
 }
 
+/**
+ * What the CLI prints on stdout. Every value goes through sanitizeText (D28, D32): a workspace path can
+ * hold anything, including something that looks like an address. JSON is sanitized value by value and
+ * then serialized, so it always parses.
+ */
+export function renderInitOutput(result: InitResult, json: boolean): string {
+  const safe = sanitizeDeep(result);
+  if (json) return `${JSON.stringify(safe, null, 2)}\n`;
+  return `Workspace: ${safe.workspace}\n\n${renderTable(safe)}\n\nNext: ${safe.next}\n`;
+}
+
 async function main(): Promise<number> {
   const { values } = parseCliArgs(process.argv.slice(2), { demo: { type: 'boolean', default: false } });
   const result = await initWorkspace({
@@ -330,12 +341,8 @@ async function main(): Promise<number> {
     demo: values.demo === true,
   });
 
-  if (values.json === true) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  } else {
-    printWarnings(result.warnings);
-    process.stdout.write(`Workspace: ${result.workspace}\n\n${renderTable(result)}\n\nNext: ${result.next}\n`);
-  }
+  if (values.json !== true) printWarnings(result.warnings);
+  process.stdout.write(renderInitOutput(result, values.json === true));
   return result.ok ? EXIT.OK : EXIT.ERROR;
 }
 

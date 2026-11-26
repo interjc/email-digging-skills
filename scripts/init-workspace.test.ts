@@ -263,3 +263,41 @@ test('init refuses a workspace in the repo that has a tracked file, and creates 
   assert.ok(!fs.existsSync(path.join(root, '.env')));
   assert.ok(!fs.existsSync(path.join(root, 'workspace', '.lock')));
 });
+
+// --- round 3 (review R4) ---------------------------------------------------------------------------
+
+import { renderInitOutput } from './init-workspace.ts';
+
+test('R4-2: every path printed (text and JSON) is sanitized; JSON still parses', async () => {
+  const root = makeRepo();
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'init-addr-')));
+  // A workspace path that looks like an address (and one that is only a "@pending"-style fragment)
+  for (const dirName of ['leak@example.com', 'leak﹫example.org', '@pending']) {
+    const ws = path.join(base, dirName, 'ws');
+    const r = await run(root, { workspace: ws });
+    assert.equal(r.workspace, ws, 'the in-process result keeps the real path');
+
+    const text = renderInitOutput(r, false);
+    assert.ok(!text.includes('leak'), `${dirName}: ${text.split('\n')[0]}`);
+    assert.ok(!text.includes('@pending'), dirName);
+
+    const json = renderInitOutput(r, true);
+    assert.ok(!json.includes('leak') && !json.includes('@pending'), dirName);
+    const parsed = JSON.parse(json);
+    assert.equal(parsed.ok, true);
+    assert.ok(Array.isArray(parsed.checks) && parsed.checks.length > 0);
+  }
+});
+
+test('R4-2: the CLI refusal (exit 2) and warnings do not print an address-like workspace path', () => {
+  const root = makeRepo({ gitignore: false });
+  fs.cpSync(path.join(REAL, 'scripts'), path.join(root, 'scripts'), { recursive: true });
+  fs.rmSync(path.join(root, 'node_modules'), { recursive: true });
+  fs.symlinkSync(path.join(REAL, 'node_modules'), path.join(root, 'node_modules'));
+  const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'init-workspace.ts'), '--workspace', path.join(root, 'leak@example.com')], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, MAIL_PIPELINE_WORKSPACE: '' },
+  });
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /not git-ignored/);
+  assert.ok(!r.stderr.includes('leak@') && !r.stdout.includes('leak@'), r.stderr);
+});

@@ -51,6 +51,15 @@ export function sanitizeText(text: string): string {
   return replaceNormalized(masked, FRAGMENT, (_normalized, original) => (original.includes('*') ? original : '***'));
 }
 
+/**
+ * True when `text` holds an address-like substring that sanitizeText would mask (same NFKC-aware
+ * detection; an already-masked `t***@e***e.com` is not an address).
+ */
+export function containsAddress(text: string): boolean {
+  const t = String(text);
+  return sanitizeText(t) !== t;
+}
+
 /** One-line, sanitized description of any thrown value. */
 export function sanitizeError(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
@@ -95,4 +104,20 @@ export function parseYamlSafe(text: string): SafeYaml {
     }
   }
   return { value, errors, warnings: doc.warnings.map(describeYamlError) };
+}
+
+/**
+ * Sanitize a JSON-able value value by value (strings and object keys through sanitizeText), keeping the
+ * structure. Serialize the result afterwards; never run sanitizeText over serialized JSON, which can turn
+ * a quoted string into invalid JSON.
+ */
+export function sanitizeDeep<T>(value: T): T {
+  if (typeof value === 'string') return sanitizeText(value) as T;
+  if (Array.isArray(value)) return value.map((v) => sanitizeDeep(v)) as T;
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[sanitizeText(k)] = sanitizeDeep(v);
+    return out as T;
+  }
+  return value;
 }
