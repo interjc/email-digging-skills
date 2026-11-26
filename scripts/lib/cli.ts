@@ -3,6 +3,7 @@
 import { parseArgs } from 'node:util';
 import { EXIT } from './types.ts';
 import { PreconditionError } from './errors.ts';
+import { sanitizeText } from './sanitize.ts';
 
 /** Flags every command accepts. */
 export const COMMON_OPTIONS = {
@@ -37,11 +38,11 @@ export async function runCli(main: () => Promise<number | void>): Promise<void> 
     process.exitCode = code ?? EXIT.OK;
   } catch (err) {
     if (err instanceof PreconditionError) {
-      process.stderr.write(`${err.message}\n`);
-      if (err.fix) process.stderr.write(`Fix: ${err.fix}\n`);
+      process.stderr.write(`${sanitizeText(err.message)}\n`);
+      if (err.fix) process.stderr.write(`Fix: ${sanitizeText(err.fix)}\n`);
       process.exitCode = EXIT.PRECONDITION;
     } else {
-      process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`Error: ${sanitizeText(err instanceof Error ? err.message : String(err))}\n`);
       process.exitCode = EXIT.ERROR;
     }
   }

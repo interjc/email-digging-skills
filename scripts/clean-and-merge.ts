@@ -1,0 +1,252 @@
+// clean-and-merge [--source <name>]... [--dry-run] [--workspace <p>] [--json]
+// Read every source with a meta.md, stage it (clean, normalize, apply overrides), merge it into the
+// main SQLite database and write the masked run report. Runs under the workspace lock (D26).
+// Order: load all metas (any error → exit 1, nothing staged) → stage → [--dry-run: report, stop]
+// → backup → runs row → merge (one transaction) → report → runs status.
+// stdout is masked: everything printed goes through sanitizeText (D28).
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { MergeStats, SourceMeta, SourceStageResult } from './lib/types.ts';
+import { EXIT } from './lib/types.ts';
+import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
+import { PreconditionError } from './lib/errors.ts';
+import { repoRoot, requireWorkspace } from './lib/paths.ts';
+import type { WorkspaceInfo } from './lib/paths.ts';
+import { loadConfig } from './lib/config.ts';
+import { loadOverrides } from './lib/overrides.ts';
+import { loadMeta } from './lib/meta.ts';
+import { stageSource } from './lib/stage.ts';
+import { backupDb, backupStamp, migrate, openDb } from './lib/db.ts';
+import { finishRun, mergeStaged, startRun, uniqueRunId } from './lib/merge.ts';
+import { resolvePriority } from './lib/priority.ts';
+import { buildReport, writeReport } from './lib/report.ts';
+import type { FullRunReport, RunStatus } from './lib/report.ts';
+import { withWorkspaceLock } from './lib/lock.ts';
+import { sanitizeText } from './lib/sanitize.ts';
+
+const MIGRATIONS = path.join(import.meta.dirname, '..', 'schema', 'migrations');
+
+export interface CleanAndMergeOptions {
+  workspace?: string | null;
+  /** Only these sources (default: every directory with a meta.md). */
+  sources?: string[];
+  dryRun?: boolean;
+  /** Repository root for config.yaml and the workspace guard. Default: this repository. */
+  repoRoot?: string;
+  /** Run timestamp (tests). Default: now. */
+  now?: Date;
+}
+
+export interface CleanAndMergeResult {
+  status: RunStatus;
+  run_id: string;
+  report: FullRunReport;
+  paths: { json: string; md: string };
+  backup_path: string | null;
+  workspace_warnings: string[];
+}
+
+function errMessage(err: unknown): string {
+  return sanitizeText(err instanceof Error ? err.message : String(err));
+}
+
+/** `base`, or `base-1`, `base-2` ... when a report with that id already exists. */
+function freeReportId(reportsDir: string, base: string): string {
+  let id = base;
+  for (let n = 1; fs.existsSync(path.join(reportsDir, `${id}.json`)); n++) id = `${base}-${n}`;
+  return id;
+}
+
+export async function cleanAndMerge(opts: CleanAndMergeOptions = {}): Promise<CleanAndMergeResult> {
+  const root = opts.repoRoot ?? repoRoot();
+  const info = requireWorkspace({ workspace: opts.workspace, repoRoot: root });
+  return withWorkspaceLock(info.workspace, 'clean-and-merge', () => runLocked(info, root, opts));
+}
+
+async function runLocked(info: WorkspaceInfo, root: string, opts: CleanAndMergeOptions): Promise<CleanAndMergeResult> {
+  const { layout } = info;
+  const warnings: string[] = [];
+  const onWarning = (m: string) => warnings.push(sanitizeText(m));
+  const config = loadConfig({ workspace: info.workspace, repoRoot: root, onWarning });
+  const overrides = loadOverrides(layout.overrides);
+
+  // Source directories: those without meta.md are skipped and listed ("run add-source").
+  const dirs = fs.readdirSync(layout.resources, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .map((e) => e.name)
+    .sort();
+  const withoutMeta = dirs.filter((d) => !fs.existsSync(path.join(layout.resources, d, 'meta.md')));
+  let selected = dirs.filter((d) => !withoutMeta.includes(d));
+  if (opts.sources && opts.sources.length > 0) {
+    const problems: string[] = [];
+    for (const s of opts.sources) {
+      if (!dirs.includes(s)) problems.push(`unknown source "${s}" (no directory resources/${s}/)`);
+      else if (withoutMeta.includes(s)) problems.push(`source "${s}" has no meta.md (run add-source ${s})`);
+    }
+    if (problems.length > 0) throw new Error(problems.join('; '));
+    selected = [...new Set(opts.sources)].sort();
+  }
+  if (selected.length === 0) {
+    throw new Error('no source with a meta.md under resources/; put the export files in resources/<name>/ and run add-source <name>');
+  }
+
+  // Load every meta first: any error stops the run before anything is staged or written.
+  const metas: SourceMeta[] = [];
+  const metaErrors: string[] = [];
+  for (const name of selected) {
+    try {
+      metas.push(loadMeta(path.join(layout.resources, name), onWarning));
+    } catch (err) {
+      metaErrors.push(errMessage(err));
+    }
+  }
+  if (metaErrors.length > 0) {
+    throw new Error(`meta.md is invalid; nothing was staged and the database is untouched.\n${metaErrors.join('\n')}`);
+  }
+
+  // Stage every source; a failing source (e.g. no email column) fails the run without a db write.
+  const results: SourceStageResult[] = [];
+  const errors: string[] = [];
+  for (const meta of metas) {
+    try {
+      results.push(await stageSource(meta, { stagingDir: layout.staging, overrides }));
+    } catch (err) {
+      errors.push(`${meta.source}: ${errMessage(err)}`);
+    }
+  }
+
+  const now = opts.now ?? new Date();
+  const nowIso = now.toISOString();
+  const stamp = backupStamp(now);
+  const common = { generatedAt: nowIso, sourcesWithoutMeta: withoutMeta, warnings, metas };
+
+  const finish = async (status: RunStatus, runId: string, merge: MergeStats | null, extra: { errors?: string[]; priorityOrder?: string[]; mergedAt?: string | null; backup?: string | null }) => {
+    const report = await buildReport(results, merge, { ...common, runId, status, errors: extra.errors ?? [], priorityOrder: extra.priorityOrder, mergedAt: extra.mergedAt ?? null });
+    const paths = writeReport(report, layout.reports);
+    return { status, run_id: runId, report, paths, backup_path: extra.backup ?? null, workspace_warnings: info.warnings };
+  };
+
+  if (errors.length > 0) {
+    errors.push('the database was not changed');
+    return finish('failed', freeReportId(layout.reports, stamp), null, { errors });
+  }
+
+  if (opts.dryRun) {
+    return finish('dry-run', freeReportId(layout.reports, `${stamp}-dry-run`), null, { priorityOrder: dryRunPriority(layout.dbPath, metas, config.sources.priority) });
+  }
+
+  const backup = backupDb(layout.dbPath, layout.backups, config.backups.keep, now);
+  const db = openDb(layout.dbPath);
+  try {
+    migrate(db, MIGRATIONS);
+    const runId = uniqueRunId(db, freeReportId(layout.reports, stamp));
+    startRun(db, runId, 'clean-and-merge', nowIso);
+    let stats: MergeStats;
+    try {
+      stats = await mergeStaged(results, {
+        db, config, metas, overrides, runId, now: nowIso, backupPath: backup, resourceSources: dirs, onWarning,
+      });
+    } catch (err) {
+      const res = await finish('failed', runId, null, {
+        errors: [`merge failed and was rolled back: ${errMessage(err)}`, backup ? `backup of the database before this run: ${backup}` : 'no backup (the database did not exist)'],
+        backup,
+      });
+      finishRun(db, runId, 'failed', new Date().toISOString(), res.paths.md);
+      return res;
+    }
+    const res = await finish('ok', runId, stats, { mergedAt: nowIso, backup });
+    finishRun(db, runId, 'ok', new Date().toISOString(), res.paths.md);
+    return res;
+  } finally {
+    db.close();
+  }
+}
+
+/** Priority order a merge would use, read from the database without writing to it. */
+function dryRunPriority(dbPath: string, metas: SourceMeta[], configured: string[]): string[] {
+  const rows: Array<{ name: string; exported_at: string | null }> = [];
+  try {
+    const db = openDb(dbPath, { readonly: true });
+    try {
+      for (const r of db.prepare('SELECT name, exported_at FROM sources').all()) rows.push({ name: String(r.name), exported_at: r.exported_at === null ? null : String(r.exported_at) });
+    } finally {
+      db.close();
+    }
+  } catch {
+    // no database or no sources table yet
+  }
+  const staged = new Set(metas.map((m) => m.source));
+  return resolvePriority([...rows.filter((r) => !staged.has(r.name)), ...metas.map((m) => ({ name: m.source, exported_at: m.exported_at }))], configured);
+}
+
+/** Short masked summary for stdout. */
+export function renderSummary(r: CleanAndMergeResult): string {
+  const rep = r.report;
+  const L: string[] = [];
+  L.push(`clean-and-merge ${r.run_id}: ${r.status}${r.status === 'dry-run' ? ' (nothing written to the database)' : ''}`);
+  L.push(`Sources processed (${rep.stage.length}): ${rep.stage.map((s) => s.source).join(', ') || '-'}`);
+  if (rep.sources_without_meta.length > 0) L.push(`Skipped, no meta.md (run add-source <name>): ${rep.sources_without_meta.join(', ')}`);
+  const files = rep.stage.flatMap((s) => s.files);
+  const sum = (k: 'rows_read' | 'empty' | 'invalid' | 'typo_suspect' | 'role') => files.reduce((n, f) => n + f[k], 0);
+  L.push(`Rows read: ${sum('rows_read')} (empty ${sum('empty')}, invalid ${sum('invalid')}, role ${sum('role')}, typo suspects ${sum('typo_suspect')})`);
+  if (rep.merge) {
+    const m = rep.merge;
+    L.push(`Contacts: ${m.contacts_total} (new ${m.contacts_new}, newly orphaned ${m.contacts_orphaned}, in 2+ sources ${m.cross_source_dups})`);
+    const o = m.overrides_applied;
+    L.push(`Overrides applied: typo ${o.typo}, exclude ${o.exclude}, suppressions ${o.suppressions}, consents ${o.consents}`);
+  } else if (r.status === 'dry-run') {
+    L.push(`Staged addresses: ${rep.staged_totals.unique_emails} unique, ${rep.staged_totals.cross_source_dups} in 2+ sources`);
+  }
+  const review = rep.samples.low_confidence_mappings.length + rep.samples.auto_encodings.length + rep.samples.typo.length;
+  if (review > 0) {
+    L.push(`To review: ${rep.samples.typo.length} typo suspect(s), ${rep.samples.low_confidence_mappings.length} low-confidence mapping(s), ${rep.samples.auto_encodings.length} detected encoding(s)`);
+  }
+  if (rep.warnings.length > 0) L.push(`Warnings (${rep.warnings.length}):`, ...rep.warnings.slice(0, 20).map((w) => `  - ${w}`));
+  if (rep.errors.length > 0) L.push('Errors:', ...rep.errors.map((e) => `  - ${e}`));
+  if (r.backup_path) L.push(`Backup: ${r.backup_path}`);
+  L.push(`Report: ${r.paths.md}`);
+  if (r.status !== 'failed') L.push('Next: review-report');
+  return sanitizeText(L.join('\n'));
+}
+
+async function main(): Promise<number> {
+  const { values } = parseCliArgs(process.argv.slice(2), {
+    source: { type: 'string', multiple: true },
+    'dry-run': { type: 'boolean', default: false },
+  });
+  const sources = (values.source as unknown as string[] | undefined) ?? [];
+  let result: CleanAndMergeResult;
+  try {
+    result = await cleanAndMerge({ workspace: values.workspace as string | undefined, sources, dryRun: values['dry-run'] === true });
+  } catch (err) {
+    // D28: nothing thrown reaches the terminal unsanitized.
+    if (err instanceof PreconditionError) throw new PreconditionError(sanitizeText(err.message), err.fix === null ? null : sanitizeText(err.fix));
+    throw new Error(errMessage(err));
+  }
+  if (values.json === true) {
+    const out = {
+      status: result.status, run_id: result.run_id, report: result.paths, backup_path: result.backup_path,
+      merge: result.report.merge, warnings: result.report.warnings, errors: result.report.errors,
+      sources_without_meta: result.report.sources_without_meta,
+    };
+    process.stdout.write(`${sanitizeText(JSON.stringify(out, null, 2))}\n`);
+  } else {
+    printWarnings(result.workspace_warnings.map(sanitizeText));
+    process.stdout.write(`${renderSummary(result)}\n`);
+  }
+  return result.status === 'failed' ? EXIT.ERROR : EXIT.OK;
+}
+
+function isEntryPoint(): boolean {
+  try {
+    return !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  await runCli(main);
+}
