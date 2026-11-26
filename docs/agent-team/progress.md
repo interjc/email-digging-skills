@@ -5,6 +5,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 ## Status snapshot
 
 <!-- newest first: one entry per recently accepted, committed or in-flight task -->
+- 2026-11-26: T10 done: first real-data merge (sample source first, then all current sources), masked output only. Phase 1 complete. Pending for the user: typo decisions in workspace/overrides/typo-decisions.yaml; new sources go through add-source → meta.md review → dry-run → merge.
 - 2026-11-26: T9 accepted (6b128f2, agy-sha gemini-4-carbon). R5 finding 1 fixed by director (b059e4e), 2–7 deferred on the T8 card. Phase 1 code complete; only T10 part 2 (real data) remains, waiting for the user's go-ahead.
 - 2026-11-26: T0–T7 accepted and committed; T8 committed (306c43f), review R5 running on Codex gpt-leon; T9 running on agy-sha; T10 demo wiring committed (390d928), real-data run waits for T9 + user confirmation.
 - 2026-11-26: T1–T6 dispatched in parallel (T1 OpenCode gpt-6.2-sol, T2 Codex gpt-leon gpt-6.2-sol, T3+T4 agy-sha gemini-4-neon, T5+T6 in-house Sonnet 5.5). T0 contracts committed (3085733, c444d93, 7ebdf26).
@@ -37,7 +38,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 - [open] Paid verification service (requirements §13) — not needed for phase 1.
 - [answered 2026-11-26 by the user, via side chat] Real-data run: the first real source is placed in workspace/resources/ (UTF-8-BOM form export). Its meta.md details are being settled with the user in the side chat. Before T10, still check that its meta.md exists and ask whether more sources are coming.
 
-- [open] 2026-11-26 Real-data run: 4 source folders are in place (3 still without meta.md); the user will keep adding new sources to workspace/resources/ over time (correction 2026-11-26: "那个目录里面以后还会加新的 resources 的"), so each new folder gets add-source → reviewed meta.md → a full clean-and-merge; first run **not yet** approved (user answered "Not yet"). Wait for the user's go-ahead, then init-workspace → add-source ×3 (drafts) → review drafts with the user → clean-and-merge --dry-run → merge.
+- [answered 2026-11-26: user said go, smallest source first] Real-data run: 4 source folders are in place (3 still without meta.md); the user will keep adding new sources to workspace/resources/ over time (correction 2026-11-26: "那个目录里面以后还会加新的 resources 的"), so each new folder gets add-source → reviewed meta.md → a full clean-and-merge; first run **not yet** approved (user answered "Not yet"). Wait for the user's go-ahead, then init-workspace → add-source ×3 (drafts) → review drafts with the user → clean-and-merge --dry-run → merge.
 
 ## Pitfalls
 
