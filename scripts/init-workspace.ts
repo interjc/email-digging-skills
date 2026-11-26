@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { EXIT } from './lib/types.ts';
 import { PreconditionError } from './lib/errors.ts';
@@ -32,6 +33,8 @@ export interface CheckRow {
 
 export interface InitOpts extends ResolveOpts {
   demo?: boolean;
+  /** Home directory for the skill check (tests). Default: os.homedir(). */
+  home?: string;
   /** Skip the DuckDB load/extension check (unit tests that must not touch the network). */
   skipDuckdb?: boolean;
 }
@@ -43,6 +46,8 @@ export interface InitResult {
   checks: CheckRow[];
   warnings: string[];
   next: string;
+  /** Reminders printed after Next (e.g. the recommended subagent-team skill). */
+  tips: string[];
 }
 
 const MIN_NODE = [22, 18] as const;
@@ -287,6 +292,28 @@ async function runDemoPipeline(root: string, demoWorkspace: string, layout: Work
   }
 }
 
+// --- step 8: recommend the subagent-team skill --------------------------------------------------------
+
+export const SUBAGENT_TEAM_REPO = 'https://github.com/interjc/subagent-team-skills';
+const SUBAGENT_TEAM_PATHS = [
+  ['.claude', 'skills', 'subagent-team'],
+  ['.agents', 'skills', 'subagent-team'],
+  ['.codex', 'skills', 'subagent-team'],
+  ['.claude', 'plugins', 'marketplaces', 'subagent-team-skills'],
+  ['.claude', 'plugins', 'cache', 'subagent-team-skills'],
+];
+
+/**
+ * Multi-step work in this repository (several sources, reviews, handovers) goes best with the
+ * subagent-team skill. Detects a user-level install; never installs anything.
+ */
+export function subagentTeamTip(home: string): string {
+  const found = SUBAGENT_TEAM_PATHS.some((parts) => fs.existsSync(path.join(home, ...parts)));
+  return found
+    ? 'subagent-team skill found: use it for multi-step work (onboarding several sources, reviews, handovers).'
+    : `Recommended: install the subagent-team skill for multi-step agent work (onboarding several sources, reviews, handovers): \`npx skills add interjc/subagent-team-skills\` (${SUBAGENT_TEAM_REPO}).`;
+}
+
 // --- orchestration ---------------------------------------------------------------------------------
 
 export async function initWorkspace(opts: InitOpts = {}): Promise<InitResult> {
@@ -343,6 +370,7 @@ export async function initWorkspace(opts: InitOpts = {}): Promise<InitResult> {
       checks,
       warnings: safety.warnings,
       next: 'add-source <name>',
+      tips: [subagentTeamTip(opts.home ?? os.homedir())],
     };
   });
 }
@@ -364,7 +392,8 @@ function renderTable(result: InitResult): string {
 export function renderInitOutput(result: InitResult, json: boolean): string {
   const safe = sanitizeDeep(result);
   if (json) return `${JSON.stringify(safe, null, 2)}\n`;
-  return `Workspace: ${safe.workspace}\n\n${renderTable(safe)}\n\nNext: ${safe.next}\n`;
+  const tips = safe.tips.map((t) => `Tip: ${t}\n`).join('');
+  return `Workspace: ${safe.workspace}\n\n${renderTable(safe)}\n\nNext: ${safe.next}\n${tips}`;
 }
 
 async function main(): Promise<number> {

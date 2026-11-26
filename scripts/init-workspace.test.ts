@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { initWorkspace } from './init-workspace.ts';
+import { initWorkspace, subagentTeamTip } from './init-workspace.ts';
 import { PreconditionError } from './lib/errors.ts';
 import { openDb } from './lib/db.ts';
 import { repoRoot, workspaceLayout } from './lib/paths.ts';
@@ -322,4 +322,15 @@ test('R4-2: the CLI refusal (exit 2) and warnings do not print an address-like w
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /not git-ignored/);
   assert.ok(!r.stderr.includes('leak@') && !r.stdout.includes('leak@'), r.stderr);
+});
+
+test('init-workspace recommends the subagent-team skill, or confirms it when installed (no install)', async () => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'init-home-')));
+  assert.match(subagentTeamTip(home), /npx skills add interjc\/subagent-team-skills/);
+  fs.mkdirSync(path.join(home, '.agents', 'skills', 'subagent-team'), { recursive: true });
+  assert.match(subagentTeamTip(home), /^subagent-team skill found/);
+  const r = await initWorkspace({ repoRoot: makeRepo(), home: fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'init-home-'))), skipDuckdb: true });
+  assert.equal(r.tips.length, 1);
+  assert.match(renderInitOutput(r, false), /\nTip: Recommended: install the subagent-team skill/);
+  assert.ok(Array.isArray(JSON.parse(renderInitOutput(r, true)).tips));
 });

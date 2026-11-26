@@ -66,6 +66,7 @@ Demo database                          ok (applied 0001_init, 0002_views)
 Demo pipeline run                      ok (36 contacts, 6 in 2+ sources, strict list 17, not blocked 29; report output/reports/20261126T122718Z.md)
 
 Next: add-source <name>
+Tip: Recommended: install the subagent-team skill for multi-step agent work (onboarding several sources, reviews, handovers): `npx skills add interjc/subagent-team-skills` (https://github.com/interjc/subagent-team-skills).
 ```
 
 接着可以直接对演示工作区运行后续命令：
@@ -138,6 +139,8 @@ email-digging-skills/
 5. **严格的数据外发边界**：**只有 `workspace/output/masked/` 目录下的脱敏副本在经人工审阅后可以离开本机**，且 `.env` 中的 `MASK_HMAC_KEY` 严禁外传。
 
 ## 配合 AI Agent 使用
+
+- **推荐搭配：[subagent-team-skills](https://github.com/interjc/subagent-team-skills)。** 实际使用往往要走很多步：接入多个来源、逐个确认 `meta.md`、预演、评审、拼写决定。用它让 Agent 做计划、分派任务并维护交接看板，会顺手很多。每台机器装一次：`npx skills add interjc/subagent-team-skills`（Claude Code 和 Codex 也可以按它的 README 用插件方式安装）。没装的话，`init-workspace` 会提醒你。
 
 - **Claude Code 与 Codex**：仓库根目录已提供指向 [`skills/`](skills/) 的符号链接 `.claude/skills` 与 `.agents/skills`，两类工具会自动发现全部 7 个流水线 Skill。
 - **其他任意 Agent**：让 Agent 阅读 [`AGENTS.md`](AGENTS.md)（`CLAUDE.md` 亦指向此处）及 [`skills/`](skills/) 下的 `SKILL.md`。所有 Skill 均采用中立描述与标准 `node` / `pnpm` 终端命令，不依赖任何特定厂商的专有工具。

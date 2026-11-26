@@ -66,6 +66,7 @@ Demo database                          ok (applied 0001_init, 0002_views)
 Demo pipeline run                      ok (36 contacts, 6 in 2+ sources, strict list 17, not blocked 29; report output/reports/20261126T122718Z.md)
 
 Next: add-source <name>
+Tip: Recommended: install the subagent-team skill for multi-step agent work (onboarding several sources, reviews, handovers): `npx skills add interjc/subagent-team-skills` (https://github.com/interjc/subagent-team-skills).
 ```
 
 Inspect the demo workspace right away:
@@ -138,6 +139,8 @@ email-digging-skills/
 5. **Strict sharing boundary**: **only files inside `workspace/output/masked/` may leave your machine** (after human review), and `MASK_HMAC_KEY` in `.env` must never be shared.
 
 ## Using with AI agents
+
+- **Recommended companion: [subagent-team-skills](https://github.com/interjc/subagent-team-skills).** Real work here spans many steps (onboarding several sources, confirming each `meta.md`, dry runs, reviews, typo decisions) and benefits from an agent that plans, delegates and keeps a handover board. Install it once per machine with `npx skills add interjc/subagent-team-skills` (Claude Code and Codex can also install it as a plugin; see its README). `init-workspace` reminds you if it is not installed.
 
 - **Claude Code & Codex**: `.claude/skills` and `.agents/skills` are symlinks to [`skills/`](skills/), so both tools discover all seven pipeline skills automatically.
 - **Any other agent**: point the agent at [`AGENTS.md`](AGENTS.md) and [`skills/`](skills/). Every `SKILL.md` uses agent-neutral instructions and plain `node` / `pnpm` shell commands with no vendor-specific tool dependencies.

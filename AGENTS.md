@@ -57,6 +57,7 @@ files with the `.ts` extension, shared types come from `scripts/lib/types.ts`.
 
 ## Subagent team
 <!-- Policy for the subagent-team skill. Edit freely; the skill reads it at the start of each task. -->
+- Skill: [interjc/subagent-team-skills](https://github.com/interjc/subagent-team-skills). Agents working here should use it for multi-step work (onboarding several sources, reviews, handovers); after `init-workspace`, if it is not installed, recommend `npx skills add interjc/subagent-team-skills` to the human (install only with consent)
 - Host harness: T3 Code, multi-vendor (confirmed 2026-11-26); Claude Code CLI and Codex CLI also supported, vendor-native
 - External route: auto (T3 → host switch per `~/.subagent-team/harness-t3-code.md`; vendor-native hosts → ACP + liaison)
 - Model policy: auto; compute, roles and fallbacks follow the user's global plan (user, 2026-11-26: "我想用全局的委派规则")

@@ -16,6 +16,8 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). If you discover a data-
    pnpm init-workspace --demo
    ```
 
+Recommended for agent-assisted development: install [subagent-team-skills](https://github.com/interjc/subagent-team-skills) (`npx skills add interjc/subagent-team-skills`). The `## Subagent team` section of `AGENTS.md` is its project policy.
+
 TypeScript runs directly on Node.js via built-in type stripping (no compile or bundle step):
 - Use **erasable TypeScript syntax only** (`tsconfig.json` enforces `erasableSyntaxOnly`): no `enum`, `namespace`, or constructor parameter properties.
 - Import local files with explicit `.ts` extensions and use `import type` for type-only imports (`verbatimModuleSyntax`).
