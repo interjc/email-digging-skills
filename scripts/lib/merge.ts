@@ -469,20 +469,33 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     INSERT INTO contact_sources (contact_id, source, raw_email, first_seen_at, last_seen_at, occurrences, files, raw_fields)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
   const reservedWarned = new Set<string>();
+  const sameAddress = { groups: 0, stacked: 0, capped: 0, max_rows: 0 };
+  const sameBySource = new Map<string, { groups: number; stacked: number }>();
   for (const email of emails) {
     const id = contactId.get(email) as number;
     for (const [source, rows] of byEmail.get(email) as Map<string, StagedRecord[]>) {
       const rep = rows[0] as StagedRecord;
+      const rawFields = mergedRawFields(rows, () => {
+        if (reservedWarned.has(source)) return;
+        reservedWarned.add(source);
+        warn(`source "${source}" has a column named ${MERGED_ROWS_KEY}; rows of one address are not stacked for this source (D36)`);
+      });
+      if (rows.length > 1) {
+        const parsed = rawFields === rep.raw_fields ? null : JSON.parse(rawFields) as Record<string, unknown>;
+        const bin = sameBySource.get(source) ?? { groups: 0, stacked: 0 };
+        sameBySource.set(source, bin);
+        sameAddress.groups++;
+        bin.groups++;
+        if (parsed) { sameAddress.stacked++; bin.stacked++; }
+        if (parsed && MERGED_ROWS_OMITTED_KEY in parsed) sameAddress.capped++;
+        sameAddress.max_rows = Math.max(sameAddress.max_rows, rows.length);
+      }
       const files = [...new Set(rows.map((r) => r.file))].sort(cmp);
       insCs.run(
         id, source, rep.raw_email,
         minStr(rows.map((r) => r.created_at)),
         maxStr(rows.map((r) => r.last_seen_at ?? r.created_at)),
-        rows.length, JSON.stringify(files), mergedRawFields(rows, () => {
-          if (reservedWarned.has(source)) return;
-          reservedWarned.add(source);
-          warn(`source "${source}" has a column named ${MERGED_ROWS_KEY}; rows of one address are not stacked for this source (D36)`);
-        }),
+        rows.length, JSON.stringify(files), rawFields,
       );
     }
   }
@@ -625,5 +638,9 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     cross_source_dups: one('SELECT COUNT(*) AS n FROM (SELECT contact_id FROM contact_sources GROUP BY contact_id HAVING COUNT(DISTINCT source) >= 2)'),
     overlap,
     overrides_applied: { typo: typoApplied, suppressions: suppressionsInserted, consents: consentsApplied, exclude: excluded },
+    same_address_rows: {
+      ...sameAddress,
+      by_source: [...sameBySource].sort(([a], [b]) => cmp(a, b)).map(([source, v]) => ({ source, ...v })),
+    },
   };
 }

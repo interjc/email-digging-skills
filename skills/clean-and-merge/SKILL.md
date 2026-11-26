@@ -38,7 +38,7 @@ Exit codes: `0` when status is `ok` or `dry-run`; `1` on invalid `meta.md`, stag
 
 ## Reading the output
 
-- Prints run ID and status (`dry-run`, `ok`, `failed`), `Sources processed`, skipped directories without `meta.md`, `Rows read` (`empty`, `invalid`, `role`, `typo suspects`), `Staged addresses` (dry run) or `Contacts` (`new`, `newly orphaned`, `in 2+ sources`) with `Overrides applied`, `To review` counts, `Warnings`, `Backup` path, and `Report` path.
+- Prints run ID and status (`dry-run`, `ok`, `failed`), `Sources processed`, skipped directories without `meta.md`, `Rows read` (`empty`, `invalid`, `role`, `typo suspects`), `Staged addresses` (dry run) or `Contacts` (`new`, `newly orphaned`, `in 2+ sources`), `Same address, several rows in one source` (only when there are any: `stacked`, `capped`, `largest`; see D36 in the cleaning rules) with `Overrides applied`, `To review` counts, `Warnings`, `Backup` path, and `Report` path.
 - Run `review-report` next to inspect unresolved items. If report writing fails after a merge commit, fix the filesystem cause and re-run `clean-and-merge` (merges are full and idempotent).
 
 ## Human decisions and where they live

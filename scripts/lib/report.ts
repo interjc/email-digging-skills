@@ -201,6 +201,9 @@ export function renderMarkdown(r: FullRunReport): string {
     L.push(`- New contacts in this run: ${m.contacts_new}`);
     L.push(`- Newly orphaned (no source contains them any more): ${m.contacts_orphaned}`);
     L.push(`- Cross-source duplicates (addresses in 2+ sources): ${m.cross_source_dups}`);
+    const d = m.same_address_rows;
+    L.push(`- Same address on several rows of one source (D36, latest row wins, others stacked in raw_fields._merged_rows): ${d.groups} (stacked ${d.stacked}, capped at 20: ${d.capped}, largest group ${d.max_rows} rows)`);
+    if (d.by_source.length > 0) pushAll(L, ['', ...table(['source', 'addresses with several rows', 'stacked'], d.by_source.map((b) => [b.source, b.groups, b.stacked]))]);
   } else {
     L.push(`- Unique addresses over the staged sources: ${r.staged_totals.unique_emails}`);
     L.push(`- Cross-source duplicates over the staged sources: ${r.staged_totals.cross_source_dups}`);

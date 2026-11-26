@@ -232,6 +232,8 @@ export function renderSummary(r: CleanAndMergeResult): string {
   if (rep.merge) {
     const m = rep.merge;
     L.push(`Contacts: ${m.contacts_total} (new ${m.contacts_new}, newly orphaned ${m.contacts_orphaned}, in 2+ sources ${m.cross_source_dups})`);
+    const d = m.same_address_rows;
+    if (d.groups > 0) L.push(`Same address, several rows in one source: ${d.groups} (stacked ${d.stacked}, capped ${d.capped}, largest ${d.max_rows} rows)`);
     const o = m.overrides_applied;
     L.push(`Overrides applied: typo ${o.typo}, exclude ${o.exclude}, suppressions ${o.suppressions}, consents ${o.consents}`);
   } else if (r.status === 'dry-run') {

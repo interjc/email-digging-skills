@@ -229,6 +229,14 @@ export interface MergeStats {
   cross_source_dups: number;     // addresses present in 2+ sources
   overlap: Array<{ a: string; b: string; contacts: number }>;
   overrides_applied: { typo: number; suppressions: number; consents: number; exclude: number };
+  /**
+   * D36: (address, source) groups with more than one row in this run (for example two user ids), how many
+   * got `_merged_rows`, how many hit the cap, and the largest group. by_source lists sources with groups > 0.
+   */
+  same_address_rows: {
+    groups: number; stacked: number; capped: number; max_rows: number;
+    by_source: Array<{ source: string; groups: number; stacked: number }>;
+  };
 }
 
 export interface RunReport {

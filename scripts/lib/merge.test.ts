@@ -481,7 +481,9 @@ test('D36: same address under two user ids in one source: the latest row wins, e
       'U8,meta@example.org,Meta,en,2025-02-01,,yes,paid',
     ].join('\n') + '\n',
   }, '  email: Email\n  name: Name\n  locale: Lang\n  created_at: Created\n  last_seen_at: Last Used\n  consent: Newsletter\n');
-  await run(w);
+  const { stats } = await run(w);
+  // dup, same, active, meta have two rows each; same is identical, so it is not stacked.
+  assert.deepEqual(stats.same_address_rows, { groups: 4, stacked: 3, capped: 0, max_rows: 2, by_source: [{ source: 'users-d36', groups: 4, stacked: 3 }] });
 
   const dup = d36Source(w, 'dup@example.org');
   assert.equal(dup.occurrences, 2);
@@ -527,7 +529,8 @@ test('D36: an older file with later activity loses to the newest file; stacking 
     'users_2025-06-01.csv': [header, 'A2,moved@example.org,From New,2025-03-01,', ...many,
       'S1,twice@example.org,Twice,2025-01-01,2025-01-05', 'S2,twice@example.org,Twice,2025-01-01,2025-01-05', 'S3,twice@example.org,Twice,2025-01-01,2025-03-01'].join('\n') + '\n',
   }, '  email: Email\n  name: Name\n  created_at: Created\n  last_seen_at: Last Login\n');
-  await run(w);
+  const { stats } = await run(w);
+  assert.deepEqual([stats.same_address_rows.groups, stats.same_address_rows.capped, stats.same_address_rows.max_rows], [3, 1, 30]);
 
   const moved = d36Source(w, 'moved@example.org');
   assert.equal(moved.raw['User ID'], 'A2', 'newest file first, even when an older file has a later activity date');

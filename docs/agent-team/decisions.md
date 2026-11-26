@@ -51,5 +51,5 @@ Back to the [board](README.md). Append new decisions at the end. Never rewrite o
   `raw_fields`, nested `{file, row_number, fields}`, collapsed and capped (20); reserved-key guard; consent
   evidence follows recency order; `query` passes `file`/`column` only for evidence and stacking metadata;
   `mask-data` drops the stacking keys.
-- Not adopted yet: a masked merge-stats counter for stacked groups (needs a MergeStats change; use a masked
-  query instead for now).
+- Merge-stats counter (Fable defect 9) adopted on the user's go ("可以按 fable 建议来"): `MergeStats.same_address_rows`,
+  printed by clean-and-merge and in the run report (counts only).
