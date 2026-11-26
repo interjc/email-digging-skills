@@ -41,6 +41,11 @@ export-to-provider (dry-run).
 | D23 | `imports.encoding` = `n/a` for xlsx/sqlite; removed source directories keep their rows (warning) | director |
 | D24 | Masked exports blank non-email personal fields (no synthetic values) and report null rates | director |
 
+| D25 | R4 confirmation: only non-UTF-8 detections and results with several candidates need human confirmation; plain UTF-8 detected without a BOM is reported but not asked about | director, R1 finding 11 |
+| D26 | Mutating commands (init-workspace, add-source, clean-and-merge, mask-data, export) hold an exclusive workspace lock (`<ws>/.lock`, created with O_EXCL, holding pid + command + start time; a stale lock whose pid is gone is reported and must be removed by the human). Staging writes into a temp dir inside `output/staging/` and renames it into place. `meta.md` is created with exclusive create | director, R1 findings 3, 5 |
+| D27 | Guard criterion for an in-repo workspace: `git ls-files` lists nothing under the workspace, `git status --porcelain --untracked-files=all` shows nothing under it (every existing file is ignored), and the not-yet-existing probe paths are ignored; every layout directory is resolved with realpath and checked the same way when it lands inside the repo (symlinks); "inside" uses path.relative, not a string prefix | director, R1 finding 1 |
+| D28 | Anything printed or thrown (headers, samples of any field, error messages, YAML parse errors) goes through `sanitizeText`, which masks every address-like substring; non-email samples are additionally masked by field | director, R1 finding 2 |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
