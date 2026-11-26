@@ -114,7 +114,7 @@ test('csv: decodedDir keeps the UTF-8 copy there; without it nothing is left beh
   assert.equal(fs.readFileSync(path.join(decoded, 'd.csv.utf8.txt'), 'utf8'), 'email\na@example.com\n');
 });
 
-test('xlsx: header row, sheet name, numbers without .0, blank rows skipped', async () => {
+test('xlsx: header row, sheet name, blank rows skipped', async () => {
   const dir = tmpDir();
   const f = path.join(dir, 'x.xlsx');
   await writeXlsx(f, [['email', 'name', 'when', 'n'], ['a@example.com', 'A', '45356', '7'], [null, null, null, null], ['b@example.com', null, '45357.5', '8']], 'People');
@@ -225,4 +225,49 @@ test('R9 duplicates: a different header set is not a duplicate even with the sam
   const inputs = [];
   for (const [name, p] of [['a.csv', a], ['b.csv', b]] as const) inputs.push({ name, path: p, meta: mf(name), probe: await probeFile(p, mf(name)) });
   assert.equal((await findDuplicates(inputs)).size, 0);
+});
+
+test('xlsx (R1-2a): blank first sheet row + header_row 3 + two data rows → both records are read', async () => {
+  const dir = tmpDir();
+  const f = path.join(dir, 'blank-first.xlsx');
+  await writeXlsx(f, [[null, null], ['Report', null], ['email', 'name'], ['a@example.com', 'A'], ['b@example.com', 'B']]);
+  const { probe, rows } = await readAll(f, mf('blank-first.xlsx', { header_row: 3 }));
+  assert.deepEqual(probe.headers, ['email', 'name']);
+  assert.equal(probe.rowCount, 2);
+  assert.deepEqual(rows.map((r) => r.cells.email), ['a@example.com', 'b@example.com']);
+  // several leading blank rows, a long data tail
+  const g = path.join(dir, 'blank-many.xlsx');
+  await writeXlsx(g, [[null], [null], ['Title'], ['email', 'n'], ...Array.from({ length: 30 }, (_, i): Array<string | null> => [`u${i}@example.com`, String(i)])]);
+  const many = await readAll(g, mf('blank-many.xlsx', { header_row: 4 }));
+  assert.equal(many.rows.length, 30);
+  assert.equal(many.rows[29]?.cells.n, '29');
+});
+
+test('xlsx (R1-2b): a populated column under a blank header is kept as column<i>, also when it is the last column', async () => {
+  const dir = tmpDir();
+  const f = path.join(dir, 'trailing.xlsx');
+  await writeXlsx(f, [['email', 'name', null, null], ['a@example.com', 'A', null, 'extra-1'], ['b@example.com', 'B', null, 'extra-2']]);
+  const { probe, rows } = await readAll(f, mf('trailing.xlsx'));
+  assert.deepEqual(probe.headers, ['email', 'name', 'column2', 'column3']);
+  assert.deepEqual(rows.map((r) => r.cells.column3), ['extra-1', 'extra-2']);
+});
+
+test('xlsx (R1-2c): text cells are returned as they are (0002.0 stays 0002.0)', async () => {
+  const dir = tmpDir();
+  const f = path.join(dir, 'text.xlsx');
+  await writeXlsx(f, [['email', 'code'], ['a@example.com', '0002.0'], ['b@example.com', '2.0']]);
+  const { rows } = await readAll(f, mf('text.xlsx'));
+  assert.deepEqual(rows.map((r) => r.cells.code), ['0002.0', '2.0']);
+});
+
+test('headers (R1-2d): repeated headers z, z, z_1 give three distinct keys (xlsx and csv)', async () => {
+  const dir = tmpDir();
+  const f = path.join(dir, 'dup.xlsx');
+  await writeXlsx(f, [['z', 'z', 'z_1', 'email'], ['1', '2', '3', 'a@example.com']]);
+  const x = await readAll(f, mf('dup.xlsx'));
+  assert.equal(new Set(x.probe.headers).size, 4);
+  assert.deepEqual(Object.values(x.rows[0]!.cells).sort(), ['1', '2', '3', 'a@example.com']);
+  const c = await readAll(writeFile(dir, 'dup.csv', 'z,z,z_1,email\n1,2,3,a@example.com\n'), mf('dup.csv'));
+  assert.equal(new Set(c.probe.headers).size, 4);
+  assert.deepEqual(Object.values(c.rows[0]!.cells).sort(), ['1', '2', '3', 'a@example.com']);
 });

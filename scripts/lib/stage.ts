@@ -12,6 +12,7 @@ import { parseDate } from './read/dates.ts';
 import { connect, ensureExtension, sqlStr } from './read/duck.ts';
 import { probeFile, readRows } from './read/index.ts';
 import { SOURCE_NAME_RE } from './meta.ts';
+import { sanitizeText } from './sanitize.ts';
 
 export interface StageOptions {
   /** `output/staging`; the source gets `<stagingDir>/<source>/`, removed and recreated. */
@@ -146,11 +147,28 @@ async function writeParquet(ndjson: NdjsonWriter, columns: ReadonlyArray<readonl
   }
 }
 
+/** Swap `tmp` into `final`. Another stage of the same source may win the race; the last rename stands. */
+function replaceDir(tmp: string, final: string): void {
+  for (let attempt = 0; ; attempt++) {
+    fs.rmSync(final, { recursive: true, force: true });
+    try {
+      fs.renameSync(tmp, final);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || (code !== 'ENOTEMPTY' && code !== 'EEXIST' && code !== 'EPERM')) throw err;
+    }
+  }
+}
+
 export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise<SourceStageResult> {
   if (!SOURCE_NAME_RE.test(meta.source)) throw new Error(`invalid source name "${meta.source}"`);
   const stagingRoot = path.resolve(opts.stagingDir);
-  const dir = path.join(stagingRoot, meta.source);
-  fs.rmSync(dir, { recursive: true, force: true });
+  const finalDir = path.join(stagingRoot, meta.source);
+  // D26: build in a unique temp directory next to the final one and rename it into place, so a
+  // reader (or a second stage of the same source) never sees a half-written directory. Source names
+  // cannot start with `_`, so the temp name never collides with a source.
+  const dir = path.join(stagingRoot, `_tmp-${meta.source}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
   fs.mkdirSync(dir, { recursive: true });
   const decodedDir = path.join(dir, '_decoded');
   const rowsTmp = new NdjsonWriter(path.join(dir, '_rows.ndjson'));
@@ -169,7 +187,7 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
       const col = (field: string): string | null => probe.mappings.find((m) => m.field === field)?.column ?? null;
       const emailCol = col('email');
       if (emailCol === null) {
-        throw new Error(`${mf.name}: no email column found. Headers seen: ${probe.headers.map((h) => JSON.stringify(h)).join(', ')}. Set \`columns.email\` in meta.md.`);
+        throw new Error(sanitizeText(`${mf.name}: no email column found. Headers seen: ${probe.headers.map((h) => JSON.stringify(h)).join(', ')}. Set \`columns.email\` in meta.md.`));
       }
       const nameCol = col('name');
       const localeCol = col('locale');
@@ -244,14 +262,16 @@ export async function stageSource(meta: SourceMeta, opts: StageOptions): Promise
       staged_rows: rowsTmp.count,
       rejected_rows: rejectTmp.count,
       unique_emails: unique.size,
-      dir,
+      dir: finalDir,
     };
     fs.writeFileSync(path.join(dir, 'stats.json'), JSON.stringify(result, null, 2) + '\n');
-    return result;
-  } finally {
-    for (const w of [rowsTmp, rejectTmp]) { try { w.close(); } catch { /* already closed */ } }
     fs.rmSync(decodedDir, { recursive: true, force: true });
     fs.rmSync(rowsTmp.file, { force: true });
     fs.rmSync(rejectTmp.file, { force: true });
+    replaceDir(dir, finalDir);
+    return result;
+  } finally {
+    for (const w of [rowsTmp, rejectTmp]) { try { w.close(); } catch { /* already closed */ } }
+    fs.rmSync(dir, { recursive: true, force: true }); // no-op after a successful rename
   }
 }

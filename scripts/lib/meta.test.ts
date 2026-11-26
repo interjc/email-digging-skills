@@ -205,3 +205,51 @@ test('renderMetaDraft: confident mappings are values, guesses are comments; dupl
   assert.deepEqual(meta.columns, { email: 'メールアドレス' });
   assert.equal(meta.exported_at, '2025-03-01');
 });
+
+// ---------------------------------------------------------------------------
+// Review R1 rework
+// ---------------------------------------------------------------------------
+
+test('R1-6: a listed symlink to an external file, a directory named like a file, and .md files are errors', () => {
+  const dir = source('shop-a', 'source: shop-a\nkind: other\nfiles:\n  - name: a.csv', ['a.csv']);
+  const outside = path.join(tmpDir(), 'outside.csv');
+  fs.writeFileSync(outside, 'email\na@example.com\n');
+  fs.symlinkSync(outside, path.join(dir, 'link.csv'));
+  fs.mkdirSync(path.join(dir, 'folder.csv'));
+  fs.writeFileSync(path.join(dir, 'notes.md'), 'x');
+  fs.symlinkSync(path.join(dir, 'a.csv'), path.join(dir, 'inner-link.csv'));
+  fs.symlinkSync(path.join(dir, 'gone.csv'), path.join(dir, 'broken.csv'));
+  const front = (name: string) => `source: shop-a\nkind: other\nfiles:\n  - name: ${name}`;
+  const write = (name: string) => fs.writeFileSync(path.join(dir, 'meta.md'), `---\n${front(name)}\n---\n`);
+
+  write('link.csv');
+  assert.match(errorsOf(dir).join('\n'), /files\[0\]\.name: "link\.csv" is a symlink to a file outside the source directory/);
+  write('folder.csv');
+  assert.match(errorsOf(dir).join('\n'), /files\[0\]\.name: "folder\.csv" is not a regular file/);
+  write('notes.md');
+  assert.match(errorsOf(dir).join('\n'), /files\[0\]\.name: "notes\.md" is not a data file/);
+  write('meta.md');
+  assert.match(errorsOf(dir).join('\n'), /is not a data file/);
+  write('broken.csv');
+  assert.match(errorsOf(dir).join('\n'), /broken symlink/);
+  write('inner-link.csv'); // a symlink whose real path stays inside the directory is fine
+  assert.equal(loadMeta(dir).files[0]?.name, 'inner-link.csv');
+});
+
+test('R1-1 (D28): YAML errors and invalid values never echo an address', () => {
+  const dir = source('shop-a', 'source: shop-a\nkind: other\nfiles:\n  - name: a.csv');
+  fs.writeFileSync(path.join(dir, 'meta.md'), '---\nsource: [secret.person@example.com\n---\n');
+  assert.throws(() => loadMeta(dir), (err: Error) => {
+    assert.doesNotMatch(err.message, /secret\.person|@example/);
+    assert.match(err.message, /not valid YAML/);
+    return true;
+  });
+  const bad = errorsOf(source('shop-b', 'source: shop-b\nkind: secret.person@example.com\nfiles:\n  - name: a.csv'));
+  assert.doesNotMatch(bad.join('\n'), /secret\.person@example\.com/);
+  assert.match(bad.join('\n'), /kind: "s\*\*\*@e\*\*\*e\.com" must be one of/);
+  // warnings are sanitized too
+  const warnings: string[] = [];
+  loadMeta(source('shop-c', 'source: shop-c\nkind: other\nfiles:\n  - name: a.csv\n    x@example.org: 1'), (w) => warnings.push(w));
+  assert.ok(warnings.length > 0);
+  assert.ok(warnings.every((w) => !/x@example\.org/.test(w)));
+});

@@ -9,6 +9,7 @@ import type {
 import { STANDARD_FIELDS } from './types.ts';
 import { byNameStem } from './read/order.ts';
 import { normalizeConsentToken } from './read/consent.ts';
+import { describeYamlError, sanitizeText } from './sanitize.ts';
 
 export const SOURCE_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const KINDS: SourceKind[] = ['product', 'event', 'other'];
@@ -21,9 +22,11 @@ const NON_DATA = new Set(['meta.md', 'meta.draft.md', 'notes.txt']);
 export class MetaError extends Error {
   errors: string[];
   constructor(dir: string, errors: string[]) {
-    super(`invalid meta.md in ${dir}:\n  - ${errors.join('\n  - ')}`);
+    // D28: error text can echo meta.md values; mask anything address-like.
+    const clean = errors.map(sanitizeText);
+    super(`invalid meta.md in ${dir}:\n  - ${clean.join('\n  - ')}`);
     this.name = 'MetaError';
-    this.errors = errors;
+    this.errors = clean;
   }
 }
 
@@ -56,6 +59,34 @@ function splitFrontmatter(text: string): string | null {
   const t = text.replace(/^﻿/, '');
   const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(t);
   return m ? (m[1] as string) : null;
+}
+
+/**
+ * R1-6: a listed file must be a regular file directly in the source directory (a symlink is allowed
+ * only when its real path is inside it), and never a meta/notes/`.md` file. Returns the problem or null.
+ */
+function fileProblem(dir: string, name: string): string | null {
+  if (!isDataFileName(name)) return `"${name}" is not a data file (meta files, NOTES.txt, .md files and dotfiles are never read)`;
+  const p = path.join(dir, name);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return `file "${name}" does not exist in ${path.basename(dir)}/`;
+  }
+  if (st.isSymbolicLink()) {
+    let real: string;
+    try {
+      real = fs.realpathSync(p);
+    } catch {
+      return `"${name}" is a broken symlink`;
+    }
+    const rel = path.relative(fs.realpathSync(dir), real);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return `"${name}" is a symlink to a file outside the source directory`;
+    if (!fs.statSync(real).isFile()) return `"${name}" is not a regular file`;
+    return null;
+  }
+  return st.isFile() ? null : `"${name}" is not a regular file`;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -103,7 +134,7 @@ export function loadMeta(dir: string, onWarning?: (message: string) => void): So
   try {
     doc = parseYaml(front);
   } catch (err) {
-    throw new MetaError(abs, [`frontmatter is not valid YAML: ${(err as Error).message.split('\n')[0]}`]);
+    throw new MetaError(abs, [`frontmatter is not valid YAML (${describeYamlError(err)})`]);
   }
   if (!isObj(doc)) throw new MetaError(abs, ['frontmatter must be a YAML mapping']);
 
@@ -154,7 +185,8 @@ export function loadMeta(dir: string, onWarning?: (message: string) => void): So
       if (name !== path.basename(name) || name === '.' || name === '..') { errors.push(`${f}.name: must be a file name inside the source directory, got "${name}"`); return; }
       if (seen.has(name)) errors.push(`${f}.name: "${name}" is listed twice`);
       seen.add(name);
-      if (!fs.existsSync(path.join(abs, name))) errors.push(`${f}.name: file "${name}" does not exist in ${dirName}/`);
+      const problem = fileProblem(abs, name);
+      if (problem) errors.push(`${f}.name: ${problem}`);
       let encoding: DeclaredEncoding = 'auto';
       if (entry.encoding !== undefined && entry.encoding !== null && entry.encoding !== '') {
         if (ENCODINGS.includes(entry.encoding as DeclaredEncoding)) encoding = entry.encoding as DeclaredEncoding;
@@ -219,10 +251,10 @@ export function loadMeta(dir: string, onWarning?: (message: string) => void): So
   if (errors.length > 0) throw new MetaError(abs, errors);
 
   if (onWarning) {
-    for (const w of warnings) onWarning(w);
+    for (const w of warnings) onWarning(sanitizeText(w));
     const listed = new Set(files.map((f) => f.name));
     for (const name of listSourceDir(abs).files) {
-      if (!listed.has(name)) onWarning(`${dirName}/${name} is in the directory but not listed in meta.md; it will not be read`);
+      if (!listed.has(name)) onWarning(sanitizeText(`${dirName}/${name} is in the directory but not listed in meta.md; it will not be read`));
     }
   }
 
@@ -248,6 +280,8 @@ export interface DraftFile {
   error?: string;
   /** Set for a suspected duplicate: the file it duplicates. The entry is written commented out. */
   duplicateOf?: string;
+  /** Per-file settings of an existing meta.md; kept as they are (R1-5). */
+  settings?: MetaFile;
 }
 
 export interface DraftInput {
@@ -258,26 +292,34 @@ export interface DraftInput {
   exportedAt: string | null;
   /** Column mappings of the first listed file, written to `columns:` when confidence >= 0.8. */
   mappings: ColumnMapping[];
+  /** An existing meta.md: its label, consent settings, exported_at and explicit columns are kept. */
+  existing?: SourceMeta | null;
 }
 
 /** Draft meta.md text. Nothing detected is silently final: low-confidence mappings are comments. */
 export function renderMetaDraft(input: DraftInput): string {
-  const out: string[] = ['---', `source: ${input.source}`, `kind: ${input.kind ?? 'other'}            # product / event / other`, 'label:'];
+  const ex = input.existing ?? null;
+  const out: string[] = ['---', `source: ${input.source}`, `kind: ${input.kind ?? ex?.kind ?? 'other'}            # product / event / other`, ex?.label ? `label: ${y(ex.label)}` : 'label:'];
   out.push('files:');
   for (const f of input.files) {
     const lines: string[] = [`- name: ${y(f.name)}`];
     const p = f.probe;
-    if (p && p.format !== 'xlsx' && p.format !== 'sqlite') {
-      const detail = p.encodingHow === 'detected' ? `  # detected ${p.encoding}${p.encodingCandidates.length > 1 ? ` (candidates: ${p.encodingCandidates.join(', ')})` : ''}; confirm, then write it here` : '';
-      lines.push(`  encoding: auto${detail}`);
-    } else if (p) {
-      lines.push('  encoding: auto');
+    const st = f.settings;
+    if (st && st.encoding !== 'auto') {
+      lines.push(`  encoding: ${st.encoding}`);
     } else {
-      lines.push('  encoding: auto');
+      const detail = p && p.encodingHow === 'detected' && p.encoding !== null
+        ? `  # detected ${p.encoding}${p.encodingCandidates.length > 1 ? ` (candidates: ${p.encodingCandidates.join(', ')})` : ''}; confirm, then write it here`
+        : '';
+      lines.push(`  encoding: auto${detail}`);
     }
-    if (p?.format === 'xlsx') lines.push('  sheet:                # blank = first sheet');
-    if (p?.format === 'sqlite') lines.push('  table:                # required when the database has several tables');
-    lines.push('  header_row: 1');
+    if (st?.sheet) lines.push(`  sheet: ${y(st.sheet)}`);
+    else if (p?.format === 'xlsx') lines.push('  sheet:                # blank = first sheet');
+    if (st?.table) lines.push(`  table: ${y(st.table)}`);
+    else if (p?.format === 'sqlite' && !st?.query) lines.push('  table:                # required when the database has several tables');
+    if (st?.query) lines.push(`  query: ${JSON.stringify(st.query)}`);
+    if (st?.delimiter) lines.push(`  delimiter: ${JSON.stringify(st.delimiter)}`);
+    lines.push(`  header_row: ${st?.header_row ?? 1}`);
     if (f.error) lines.push(`  # could not be probed: ${f.error.replace(/\s+/g, ' ')}`);
     if (f.duplicateOf !== undefined) {
       out.push(`# suspected duplicate of ${f.duplicateOf} (same headers and rows); uncomment to include`);
@@ -288,12 +330,22 @@ export function renderMetaDraft(input: DraftInput): string {
   }
   out.push('columns:                 # original column name for each standard field; blank = auto-detect');
   for (const m of input.mappings) {
-    if (m.column !== null && m.confidence >= 0.8) out.push(`  ${m.field}: ${y(m.column)}   # ${m.how}, ${m.confidence}`);
+    const fixed = ex?.columns[m.field];
+    if (fixed) out.push(`  ${m.field}: ${y(fixed)}`);
+    else if (m.column !== null && m.confidence >= 0.8) out.push(`  ${m.field}: ${y(m.column)}   # ${m.how}, ${m.confidence}`);
     else if (m.column !== null) out.push(`  ${m.field}:   # guess: ${y(m.column)} (${m.how}, ${m.confidence}); confirm`);
     else out.push(`  ${m.field}:`);
   }
-  out.push('consent_basis: unknown   # how consent was collected: opt_in / transactional / unknown; confirm');
-  out.push(`exported_at: ${input.exportedAt ?? ''}${input.exportedAt ? '   # guessed from a file name; confirm' : ''}`.trimEnd());
+  if (ex?.consent_values) {
+    out.push('consent_values:');
+    if (ex.consent_values.granted) out.push(`  granted: ${JSON.stringify(ex.consent_values.granted)}`);
+    if (ex.consent_values.denied) out.push(`  denied: ${JSON.stringify(ex.consent_values.denied)}`);
+  }
+  out.push(ex
+    ? `consent_basis: ${ex.consent_basis}   # kept from the existing meta.md`
+    : 'consent_basis: unknown   # how consent was collected: opt_in / transactional / unknown; confirm');
+  if (ex?.exported_at) out.push(`exported_at: ${ex.exported_at}   # kept from the existing meta.md`);
+  else out.push(`exported_at: ${input.exportedAt ?? ''}${input.exportedAt ? '   # guessed from a file name; confirm' : ''}`.trimEnd());
   out.push('---', '', '## Notes', '- How the data was collected and which period it covers', '- Known problems (test accounts, unclear columns)', '');
   return out.join('\n');
 }

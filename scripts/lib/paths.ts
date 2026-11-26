@@ -3,10 +3,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 import { loadEnv } from './env.ts';
 import { PreconditionError } from './errors.ts';
+import { sanitizeText } from './sanitize.ts';
 
 export interface WorkspaceLayout {
   workspace: string;
@@ -144,51 +146,80 @@ function realpathLoose(p: string): string {
   }
 }
 
+/** True when `child` is `parent` or below it. Uses path.relative: a directory named `..private` is inside. */
 function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  if (rel === '') return true;
+  return rel.split(path.sep)[0] !== '..' && !path.isAbsolute(rel);
 }
 
-function git(root: string, args: string[]): { status: number; stdout: string } {
-  try {
-    const stdout = execFileSync('git', args, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8' });
-    return { status: 0, stdout };
-  } catch (err) {
-    const status = (err as { status?: number | null }).status;
-    return { status: typeof status === 'number' ? status : 127, stdout: '' };
-  }
+function git(root: string, args: string[], input?: string): { status: number; stdout: string } {
+  // check-ignore rejects --literal-pathspecs; every other call here passes paths as pathspecs.
+  const literal = args[0] === 'check-ignore' ? [] : ['--literal-pathspecs'];
+  const r = spawnSync('git', [...literal, ...args], {
+    cwd: root, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'], encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
+  });
+  return { status: typeof r.status === 'number' ? r.status : 127, stdout: r.stdout ?? '' };
 }
 
 export interface WorkspaceSafety {
+  /** The workspace, or any of its layout directories / database file, resolves inside the repository. */
   insideRepo: boolean;
   gitRepo: boolean;
-  /** Paths (relative to the workspace) that git would NOT ignore. Empty when safe. */
+  /** Files tracked by git under the workspace (relative paths). */
+  tracked: string[];
+  /** Existing files git would not ignore, and probe paths that would not be ignored. Empty when safe. */
   notIgnored: string[];
   /** Non-empty = the workspace must not be used. */
   problems: string[];
   warnings: string[];
 }
 
-// Probe files that must be git-ignored. The first two are the required ones; the rest close the gap
-// where the repo-wide `*.csv` / `*.sqlite` safety-net patterns would hide an unignored workspace.
-const PROBES = [
-  'resources/__probe__.csv',
-  'database/__probe__.sqlite',
-  'overrides/__probe__.yaml',
-  'output/reports/__probe__.md',
-  'output/exports/__probe__.json',
-];
+// New files of these kinds must be ignored in every in-repo layout directory. The probe name is random
+// per run, so a narrow ignore rule that matches only a fixed probe name cannot pass the guard.
+const PROBE_SUFFIXES = ['csv', 'sqlite', 'json', 'yaml', 'md'];
 
-/** Check that a workspace inside the repository is git-ignored, and warn about cloud folders. */
+function nulList(text: string): string[] {
+  return text.split('\0').filter((s) => s !== '');
+}
+
+/**
+ * Guard for a workspace that could end up in the repository (D27). The workspace is unsafe unless, for
+ * every layout directory and the database file that resolves (realpath, so symlinks count) inside the repo:
+ *  - git tracks nothing there (the placeholder `<workspace>/.gitkeep` is allowed),
+ *  - `git status --untracked-files=all` shows nothing (every existing file is ignored), and
+ *  - new files of the usual kinds (random probe names) would be ignored.
+ * A repository that is not a git repo only produces a warning. Cloud-synced folders produce a warning.
+ */
 export function checkWorkspaceSafety(workspace: string, root: string = repoRoot()): WorkspaceSafety {
-  const result: WorkspaceSafety = { insideRepo: false, gitRepo: false, notIgnored: [], problems: [], warnings: [] };
+  const result: WorkspaceSafety = {
+    insideRepo: false, gitRepo: false, tracked: [], notIgnored: [], problems: [], warnings: [],
+  };
 
   const cloud = cloudSyncWarning(workspace);
   if (cloud) result.warnings.push(cloud);
 
   const realRoot = realpathLoose(root);
+  const layout = workspaceLayout(workspace);
   const realWs = realpathLoose(workspace);
-  result.insideRepo = isInside(realWs, realRoot);
+  const wsInside = isInside(realWs, realRoot);
+
+  // Layout directories that land inside the checkout, by real path (this catches a symlinked
+  // `resources` of an external workspace as well as every directory of an in-repo workspace).
+  const dirs = new Set<string>();
+  if (wsInside) dirs.add(realWs);
+  const redirected: string[] = [];
+  for (const dir of layoutDirs(layout)) {
+    const real = realpathLoose(dir);
+    if (!isInside(real, realRoot)) continue;
+    dirs.add(real);
+    if (!wsInside) redirected.push(path.relative(workspace, dir) || '.');
+  }
+  const realDb = realpathLoose(layout.dbPath);
+  const dbFile = isInside(realDb, realRoot) && (wsInside ? true : !dirs.has(path.dirname(realDb))) ? realDb : null;
+  if (dbFile && !wsInside) redirected.push(path.relative(workspace, layout.dbPath));
+
+  result.insideRepo = dirs.size > 0 || dbFile !== null;
   if (!result.insideRepo) return result;
 
   result.gitRepo = git(realRoot, ['rev-parse', '--is-inside-work-tree']).stdout.trim() === 'true';
@@ -197,19 +228,79 @@ export function checkWorkspaceSafety(workspace: string, root: string = repoRoot(
     return result;
   }
 
-  const relWs = path.relative(realRoot, realWs);
-  for (const probe of PROBES) {
-    const rel = path.join(relWs, probe);
-    if (git(realRoot, ['check-ignore', '-q', '--', rel]).status !== 0) result.notIgnored.push(probe);
+  const rel = (abs: string) => path.relative(realRoot, abs) || '.';
+  const show = (abs: string) => (wsInside ? path.relative(realWs, abs) || '.' : rel(abs));
+  const pathspecs = [...dirs, ...(dbFile ? [dbFile] : [])].map(rel);
+
+  // 1. tracked files
+  const ls = git(realRoot, ['ls-files', '-z', '--', ...pathspecs]);
+  if (ls.status !== 0) {
+    result.problems.push('git could not list the tracked files (git ls-files failed), so the workspace cannot be verified');
   }
-  if (result.notIgnored.length > 0) {
-    result.problems.push(
-      `The workspace (${workspace}) is inside the repository but not git-ignored ` +
-      `(not ignored: ${result.notIgnored.join(', ')}). Real data could be committed.`,
-    );
+  // The empty `<workspace>/.gitkeep` placeholder is the one file the repository may track.
+  const placeholderAbs = path.join(realWs, '.gitkeep');
+  const placeholder = wsInside && isEmptyFile(placeholderAbs) ? path.relative(realRoot, placeholderAbs) : null;
+  result.tracked = nulList(ls.stdout).filter((f) => f !== placeholder);
+
+  // 2. existing files that are neither tracked nor ignored
+  const st = git(realRoot, ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...pathspecs]);
+  if (st.status !== 0) {
+    result.problems.push('git could not read the status (git status failed), so the workspace cannot be verified');
+  }
+  const unignored = nulList(st.stdout).map((e) => e.slice(3)).filter((f) => f !== placeholder);
+  result.notIgnored.push(...unignored);
+
+  // 3. new files must be ignored
+  const stem = `__probe_${crypto.randomBytes(4).toString('hex')}__`;
+  const probes: Array<{ abs: string; label: string }> = [];
+  for (const dir of dirs) {
+    for (const ext of PROBE_SUFFIXES) {
+      probes.push({ abs: path.join(dir, `${stem}.${ext}`), label: `${show(dir)}/__probe__.${ext}`.replace(/^\.\//, '') });
+    }
+  }
+  if (wsInside) probes.push({ abs: path.join(realWs, '.lock'), label: '.lock' });
+  if (probes.length > 0) {
+    const ci = git(realRoot, ['check-ignore', '-z', '--stdin'], probes.map((p) => `${rel(p.abs)}\0`).join(''));
+    if (ci.status > 1) {
+      result.problems.push('git could not check the ignore rules (git check-ignore failed), so the workspace cannot be verified');
+    }
+    const ignored = new Set(nulList(ci.stdout));
+    for (const p of probes) if (!ignored.has(rel(p.abs))) result.notIgnored.push(p.label);
+  }
+  if (dbFile) {
+    const ci = git(realRoot, ['check-ignore', '-q', '--', rel(dbFile)]);
+    if (ci.status !== 0) result.notIgnored.push(show(dbFile));
+  }
+
+  const parts: string[] = [];
+  if (result.tracked.length > 0) {
+    parts.push(`${result.tracked.length} file(s) are tracked by git (${sampleNames(result.tracked)})`);
+  }
+  if (result.notIgnored.length > 0) parts.push(`not git-ignored: ${sampleNames(result.notIgnored)}`);
+  if (parts.length > 0) {
+    if (redirected.length > 0) parts.unshift(`${redirected.join(', ')} resolve${redirected.length === 1 ? 's' : ''} into the repository`);
+    result.problems.unshift(`The workspace (${workspace}) is inside the repository and real data could be committed: ${parts.join('; ')}`);
   }
   return result;
 }
+
+function isEmptyFile(p: string): boolean {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() && st.size === 0;
+  } catch {
+    return false;
+  }
+}
+
+function sampleNames(names: string[]): string {
+  const shown = names.slice(0, 3).map(sanitizeText).join(', ');
+  return names.length > 3 ? `${shown}, and ${names.length - 3} more` : shown;
+}
+
+/** Fix text shared by every refusal of an unsafe workspace. */
+export const SAFETY_FIX =
+  'git-ignore the workspace in .gitignore (`workspace/*`), untrack anything git tracks there, or choose a workspace outside the repository with --workspace; then run `pnpm init-workspace`.';
 
 export interface WorkspaceInfo {
   workspace: string;
@@ -231,17 +322,25 @@ export function requireWorkspace(opts: ResolveOpts = {}): WorkspaceInfo {
   if (safety.problems.length > 0) {
     throw new PreconditionError(
       safety.problems.join(' '),
-      'add `workspace/*` to .gitignore (or choose a workspace outside the repository with --workspace), then run `pnpm init-workspace`.',
+      SAFETY_FIX,
     );
   }
 
   const missing = layoutDirs(layout).filter((d) => !isDir(d));
-  if (missing.length > 0 || !fs.existsSync(layout.dbPath)) {
+  if (missing.length > 0 || !isFile(layout.dbPath)) {
     const what = !isDir(workspace) ? `The workspace does not exist: ${workspace}` : `The workspace is not initialized: ${workspace}`;
     throw new PreconditionError(what, 'run `pnpm init-workspace` (add `--workspace <path>` for a custom location).');
   }
 
   return { workspace, layout, warnings: safety.warnings };
+}
+
+function isFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function isDir(p: string): boolean {

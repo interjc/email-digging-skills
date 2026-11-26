@@ -88,3 +88,11 @@ test('an empty config.yaml (or only comments) is the defaults', () => {
   assert.equal(parseConfig('# nothing\n').config.backups.keep, 20);
   assert.equal(parseConfig('sources:\n  priority: []\n#  - x\n').config.sources.priority.length, 0);
 });
+
+test('config errors and warnings never echo address-like values (D28)', () => {
+  assert.throws(() => parseConfig('a: [leak@example.com\n'), (e: unknown) => !(e as Error).message.includes('leak') && /not valid YAML \(.*line \d+/.test((e as Error).message));
+  assert.throws(() => parseConfig('consent:\n  opt_in_bases: [leak@example.com]\n'), (e: unknown) => !(e as Error).message.includes('leak@'));
+  const { warnings } = parseConfig('leak@example.com: 1\n');
+  assert.equal(warnings.length, 1);
+  assert.ok(!String(warnings[0]).includes('leak@'), String(warnings[0]));
+});

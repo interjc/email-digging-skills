@@ -50,14 +50,17 @@ async function* streamRows(conn: DuckDBConnection, sql: string): AsyncGenerator<
   }
 }
 
-/** DuckDB names empty or repeated headers itself (`column3`, `email_1`); do the same for grid sources. */
+/**
+ * Empty headers become `column<i>`; repeated ones get `_1`, `_2`... and every result is unique
+ * (so `z`, `z`, `z_1` cannot produce a duplicate key).
+ */
 export function uniqueHeaders(raw: Array<string | null>): string[] {
-  const seen = new Map<string, number>();
+  const used = new Set<string>();
   return raw.map((h, i) => {
-    let name = h === null || h.trim() === '' ? `column${i}` : h;
-    const n = seen.get(name) ?? 0;
-    seen.set(name, n + 1);
-    if (n > 0) name = `${name}_${n}`;
+    const base = h === null || h.trim() === '' ? `column${i}` : h;
+    let name = base;
+    for (let k = 1; used.has(name); k++) name = `${base}_${k}`;
+    used.add(name);
     return name;
   });
 }
@@ -67,11 +70,6 @@ export function columnLetters(n: number): string {
   let s = '';
   for (let k = n; k > 0; k = Math.floor((k - 1) / 26)) s = String.fromCharCode(65 + ((k - 1) % 26)) + s;
   return s;
-}
-
-/** Excel stores numbers as doubles; DuckDB prints whole ones as `2.0`. Drop the artifact. */
-function xlsxCell(v: string | null): string | null {
-  return v !== null && /^-?\d+\.0$/.test(v) ? v.slice(0, -2) : v;
 }
 
 export async function openTable(file: string, format: FileFormat, meta: MetaFile, opts: OpenTableOptions = {}): Promise<OpenTable> {
@@ -97,7 +95,7 @@ export async function openTable(file: string, format: FileFormat, meta: MetaFile
         ...(delim ? [`delim=${sqlStr(delim)}`] : []),
       ].join(', ');
       const result = await conn.stream(`SELECT * FROM read_csv(${sqlStr(p)}, ${options})`);
-      const headers = result.columnNames();
+      const headers = uniqueHeaders(result.columnNames());
       async function* gen(): AsyncGenerator<Array<string | null>> {
         for await (const chunk of result.yieldRows()) for (const row of chunk) yield row.map(cell);
       }
@@ -108,23 +106,34 @@ export async function openTable(file: string, format: FileFormat, meta: MetaFile
       await ensureExtension('excel');
       const sheet = meta.sheet ? `, sheet=${sqlStr(meta.sheet)}` : '';
       const base = `header=false, all_varchar=true, stop_at_empty=false${sheet}`;
-      // Without a range DuckDB takes the width of the first sheet row, which cuts the columns when
-      // a short title row comes first, and (by default) stops at the first blank row. So: count the
-      // rows, read the header row with a wide range, then read the data with an exact range.
+      const read = (range: string) => `SELECT * FROM read_xlsx(${sqlStr(file)}, ${base}, range='${range}')`;
+      // Without a range DuckDB starts at the first non-empty row and takes the width of that row, and
+      // (by default) stops at the first blank row. So every read here uses an explicit range from A1.
+      // The count of auto-detected rows is at most the physical row count, and the first non-blank
+      // row is within the first `header_row` rows, so `total + headerRow` reaches the physical end;
+      // rows past the real end come back as blank rows and are skipped.
       const countRows = await conn.runAndReadAll(`SELECT count(*) FROM read_xlsx(${sqlStr(file)}, ${base})`);
       const total = Number(countRows.getRows()[0]?.[0] ?? 0);
-      if (total < headerRow) return { headers: [], rows: (async function* () {})(), close };
-      const head = await conn.runAndReadAll(`SELECT * FROM read_xlsx(${sqlStr(file)}, ${base}, range='A1:XFD${headerRow}')`);
-      const headerCells = (head.getRows()[headerRow - 1] ?? []).map(cell);
-      let width = headerCells.length;
-      while (width > 0 && (headerCells[width - 1] === null || (headerCells[width - 1] as string).trim() === '')) width--;
-      const headers = uniqueHeaders(headerCells.slice(0, width).map(xlsxCell));
+      const endRow = total + headerRow;
+      if (total === 0) return { headers: [], rows: (async function* () {})(), close };
+      const head = (await conn.runAndReadAll(read(`A1:XFD${headerRow}`))).getRows();
+      const headerCells = (head[headerRow - 1] ?? []).map(cell);
+      const lastUsed = (row: Array<string | null>): number => {
+        let n = row.length;
+        while (n > 0 && (row[n - 1] === null || (row[n - 1] as string).trim() === '')) n--;
+        return n;
+      };
+      // Width = widest of the header row and the data rows, so a populated column under a blank
+      // header is kept (it gets a `column<i>` name).
+      let width = lastUsed(headerCells);
+      const dataRange = (w: number) => `A${headerRow + 1}:${columnLetters(Math.max(w, 1))}${endRow}`;
+      for await (const row of streamRows(conn, read(`A${headerRow + 1}:ZZ${endRow}`))) width = Math.max(width, lastUsed(row));
+      if (width === 0) return { headers: [], rows: (async function* () {})(), close };
+      const headers = uniqueHeaders(Array.from({ length: width }, (_, i) => headerCells[i] ?? null));
       async function* gen(): AsyncGenerator<Array<string | null>> {
-        if (total <= headerRow || width === 0) return;
-        const range = `A${headerRow + 1}:${columnLetters(width)}${total}`;
-        for await (const row of streamRows(conn, `SELECT * FROM read_xlsx(${sqlStr(file)}, ${base}, range='${range}')`)) {
+        for await (const row of streamRows(conn, read(dataRange(width)))) {
           if (row.every((v) => v === null || v.trim() === '')) continue; // blank sheet rows are not records
-          yield row.map(xlsxCell);
+          yield row;
         }
       }
       return { headers, rows: gen(), close };

@@ -159,3 +159,119 @@ test('cloud warning is returned by requireWorkspace, not thrown', () => {
   const info = requireWorkspace({ repoRoot: root, workspace: ws, env: {} });
   assert.match(info.warnings.join('\n'), /cloud-synced folder/);
 });
+
+// --- D27 guard (review R1 finding 1) -------------------------------------------------------------
+
+function write(file: string, text = 'x\n'): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+}
+
+test('guard: narrow ignore rules that match only fixed probe names do not pass', () => {
+  const root = makeRepo({ gitignore: false });
+  fs.writeFileSync(path.join(root, '.gitignore'), [
+    'workspace/resources/__probe__.csv',
+    'workspace/database/__probe__.sqlite',
+    'workspace/overrides/__probe__.yaml',
+    'workspace/output/reports/__probe__.md',
+    'workspace/output/exports/__probe__.json',
+  ].join('\n'));
+  initLayout(path.join(root, 'workspace'));
+  // No data file yet: new files would not be ignored (the probe name is random per run).
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /not git-ignored/);
+});
+
+test('guard: an existing unignored JSON input is caught even when every probe path is ignored', () => {
+  const root = makeRepo({ gitignore: false });
+  // Ignores everything except *.json: a fixed-probe check would pass.
+  fs.writeFileSync(path.join(root, '.gitignore'), 'workspace/*\n!workspace/resources\nworkspace/resources/*\n!workspace/resources/*.json\n');
+  initLayout(path.join(root, 'workspace'));
+  write(path.join(root, 'workspace', 'resources', 'customers.json'));
+  const safety = checkWorkspaceSafety(path.join(root, 'workspace'), root);
+  assert.ok(safety.notIgnored.some((n) => n.endsWith('customers.json')), safety.notIgnored.join(','));
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /not git-ignored/);
+});
+
+test('guard: a file tracked by git under the workspace is refused; the .gitkeep placeholder is allowed', () => {
+  const root = makeRepo();
+  const ws = path.join(root, 'workspace');
+  initLayout(ws);
+  write(path.join(ws, '.gitkeep'), '');
+  execFileSync('git', ['add', '-f', 'workspace/.gitkeep'], { cwd: root });
+  assert.deepEqual(requireWorkspace({ repoRoot: root, env: {} }).warnings, []);
+
+  write(path.join(ws, 'resources', 'tracked.csv'));
+  execFileSync('git', ['add', '-f', 'workspace/resources/tracked.csv'], { cwd: root });
+  assert.throws(
+    () => requireWorkspace({ repoRoot: root, env: {} }),
+    (err: unknown) => err instanceof PreconditionError && /tracked by git/.test(err.message),
+  );
+  assert.deepEqual(checkWorkspaceSafety(ws, root).tracked, ['workspace/resources/tracked.csv']);
+});
+
+test('guard: an in-repo directory named "..private" is inside the repo, not external', () => {
+  const root = makeRepo({ gitignore: false });
+  const ws = path.join(root, '..private');
+  initLayout(ws);
+  const safety = checkWorkspaceSafety(ws, root);
+  assert.equal(safety.insideRepo, true);
+  assert.throws(() => requireWorkspace({ repoRoot: root, workspace: ws, env: {} }), /not git-ignored/);
+});
+
+test('guard: an external workspace whose resources is a symlink into the checkout is refused', () => {
+  const root = makeRepo();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-ext-')));
+  initLayout(outside);
+  fs.mkdirSync(path.join(root, 'data'));
+  fs.rmSync(path.join(outside, 'resources'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'data'), path.join(outside, 'resources'));
+  const safety = checkWorkspaceSafety(outside, root);
+  assert.equal(safety.insideRepo, true);
+  assert.match(safety.problems.join(' '), /resources resolves into the repository/);
+  assert.throws(
+    () => requireWorkspace({ repoRoot: root, workspace: outside, env: {} }),
+    (err: unknown) => err instanceof PreconditionError && /not git-ignored/.test(err.message),
+  );
+});
+
+test('guard: a symlink into an ignored place inside the checkout is fine', () => {
+  const root = makeRepo();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-ext-')));
+  initLayout(outside);
+  fs.mkdirSync(path.join(root, 'workspace', 'inputs'), { recursive: true });
+  fs.rmSync(path.join(outside, 'resources'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'workspace', 'inputs'), path.join(outside, 'resources'));
+  const info = requireWorkspace({ repoRoot: root, workspace: outside, env: {} });
+  assert.equal(info.workspace, outside);
+});
+
+test('guard: the workspace being the repository root is refused', () => {
+  const root = makeRepo();
+  fs.writeFileSync(path.join(root, 'x.txt'), 'tracked');
+  execFileSync('git', ['add', 'x.txt'], { cwd: root });
+  assert.ok(checkWorkspaceSafety(root, root).problems.length > 0);
+});
+
+test('guard: file names in the refusal are masked when they look like addresses', () => {
+  const root = makeRepo({ gitignore: false });
+  const ws = path.join(root, 'workspace');
+  initLayout(ws);
+  write(path.join(ws, 'resources', 'taro@example.com.txt')); // email-scan:allow
+  let message = '';
+  try {
+    requireWorkspace({ repoRoot: root, env: {} });
+  } catch (err) {
+    message = (err as Error).message;
+  }
+  assert.match(message, /not git-ignored/);
+  assert.ok(!message.includes('taro@'), message);
+});
+
+test('requireWorkspace: database/mail-list.sqlite must be a regular file, not a directory', () => {
+  const root = makeRepo();
+  const ws = path.join(root, 'workspace');
+  initLayout(ws);
+  fs.rmSync(workspaceLayout(ws).dbPath);
+  fs.mkdirSync(workspaceLayout(ws).dbPath);
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /not initialized/);
+});

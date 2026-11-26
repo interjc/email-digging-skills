@@ -9,6 +9,7 @@ import { PreconditionError } from './lib/errors.ts';
 import { openDb } from './lib/db.ts';
 import { repoRoot, workspaceLayout } from './lib/paths.ts';
 import { parseEnv } from './lib/env.ts';
+import { lockPath } from './lib/lock.ts';
 
 const REAL = repoRoot();
 
@@ -211,4 +212,54 @@ test('CLI: exit code 2 and a fix on stderr when the workspace is inside the repo
   assert.match(r.stderr, /Fix:/);
   assert.equal(r.stdout, '');
   assert.ok(!fs.existsSync(path.join(root, 'workspace')));
+});
+
+test('a duplicate empty MASK_HMAC_KEY after a non-empty one: the effective (last) assignment is filled', async () => {
+  const root = makeRepo();
+  fs.writeFileSync(path.join(root, '.env'), 'MASK_HMAC_KEY=old\nLISTMONK_URL=x\nMASK_HMAC_KEY=\n');
+  await run(root);
+  const text = fs.readFileSync(path.join(root, '.env'), 'utf8');
+  const lines = text.split('\n');
+  assert.equal(lines[0], 'MASK_HMAC_KEY=old', 'the shadowed first line is untouched');
+  assert.match(lines[2] as string, /^MASK_HMAC_KEY=[0-9a-f]{64}$/);
+  assert.match(parseEnv(text).MASK_HMAC_KEY ?? '', /^[0-9a-f]{64}$/, 'what the parser reads is the generated key');
+});
+
+test('D26: init holds the workspace lock while it runs and releases it afterwards', async () => {
+  const root = makeRepo();
+  const r = await run(root);
+  assert.ok(!fs.existsSync(lockPath(r.workspace)), 'lock released after a normal run');
+
+  // A second command (or init) cannot run while another holds the lock.
+  const { withWorkspaceLock } = await import('./lib/lock.ts');
+  await withWorkspaceLock(r.workspace, 'clean-and-merge', async () => {
+    await assert.rejects(
+      () => run(root),
+      (err: unknown) => err instanceof PreconditionError && /in use by "clean-and-merge"/.test(err.message),
+    );
+  });
+  await run(root); // free again
+});
+
+test('D26: init releases the lock when a check fails, and refuses on a stale lock without removing it', async () => {
+  const root = makeRepo();
+  fs.writeFileSync(path.join(root, 'schema', 'migrations', '0099_bad.sql'), 'NOT SQL;\n');
+  const r = await run(root);
+  assert.equal(r.ok, false);
+  assert.ok(!fs.existsSync(lockPath(r.workspace)));
+
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid as number;
+  fs.writeFileSync(lockPath(r.workspace), JSON.stringify({ pid: dead, command: 'add-source', started_at: '2026-01-01T00:00:00.000Z' }));
+  await assert.rejects(() => run(root), /stale/);
+  assert.ok(fs.existsSync(lockPath(r.workspace)));
+});
+
+test('init refuses a workspace in the repo that has a tracked file, and creates nothing new', async () => {
+  const root = makeRepo();
+  fs.mkdirSync(path.join(root, 'workspace', 'resources'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'workspace', 'resources', 'tracked.csv'), 'x\n');
+  execFileSync('git', ['add', '-f', 'workspace/resources/tracked.csv'], { cwd: root });
+  await assert.rejects(() => run(root), /tracked by git/);
+  assert.ok(!fs.existsSync(path.join(root, '.env')));
+  assert.ok(!fs.existsSync(path.join(root, 'workspace', '.lock')));
 });

@@ -10,10 +10,12 @@ import { execFileSync } from 'node:child_process';
 import { EXIT } from './lib/types.ts';
 import { PreconditionError } from './lib/errors.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
-import { parseEnv } from './lib/env.ts';
+import { parseEnv, setEnvValue } from './lib/env.ts';
+import { withWorkspaceLock } from './lib/lock.ts';
+import { sanitizeError } from './lib/sanitize.ts';
 import { openDb, migrate } from './lib/db.ts';
 import {
-  checkWorkspaceSafety, layoutDirs, repoRoot, resolveWorkspace, workspaceLayout,
+  SAFETY_FIX, checkWorkspaceSafety, layoutDirs, repoRoot, resolveWorkspace, workspaceLayout,
 } from './lib/paths.ts';
 import type { ResolveOpts, WorkspaceLayout } from './lib/paths.ts';
 
@@ -50,9 +52,7 @@ function row(check: string, result: CheckResult, detail: string, fix = ''): Chec
   return { check, result, detail, fix };
 }
 
-function errText(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).split('\n')[0] as string;
-}
+const errText = sanitizeError;
 
 // --- step 1: toolchain checks ------------------------------------------------------------------
 
@@ -164,10 +164,8 @@ function ensureHmacKey(envFile: string): CheckRow {
   if (current !== undefined && current !== '') return row('MASK_HMAC_KEY', 'ok', 'already set');
 
   const key = crypto.randomBytes(32).toString('hex');
-  const lineRe = /^(\s*(?:export\s+)?MASK_HMAC_KEY\s*=).*$/m;
-  const next = lineRe.test(text)
-    ? text.replace(lineRe, (_m, head: string) => `${head}${key}`)
-    : `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}MASK_HMAC_KEY=${key}\n`;
+  // Edit the assignment the parser reads (the last one), so a duplicate empty line cannot shadow the key.
+  const next = setEnvValue(text, 'MASK_HMAC_KEY', key);
   fs.writeFileSync(envFile, next);
   return row('MASK_HMAC_KEY', 'ok', 'generated (stored in .env, not shown)');
 }
@@ -269,48 +267,51 @@ export async function initWorkspace(opts: InitOpts = {}): Promise<InitResult> {
   if (safety.problems.length > 0) {
     throw new PreconditionError(
       safety.problems.join(' '),
-      'add `workspace/*` to .gitignore, or choose a location outside the repository with --workspace <path>.',
+      SAFETY_FIX,
     );
   }
 
-  // 1. toolchain
-  checks.push(checkNode(), checkDeps(root));
-  if (opts.skipDuckdb) checks.push(row('DuckDB + extensions', 'skipped', 'skipped by caller'));
-  else checks.push(...(await checkDuckdb()));
-  checks.push(row(
-    'Workspace location',
-    safety.warnings.length > 0 ? 'warn' : 'ok',
-    safety.insideRepo ? (safety.gitRepo ? 'inside the repository, git-ignored' : 'inside the repository (not a git repo)') : 'outside the repository',
-    safety.warnings.length > 0 ? 'see warnings; prefer a folder that is not synced to a cloud provider' : '',
-  ));
+  // D26: hold the exclusive workspace lock for everything that writes.
+  return withWorkspaceLock(workspace, 'init-workspace', async (): Promise<InitResult> => {
+    // 1. toolchain
+    checks.push(checkNode(), checkDeps(root));
+    if (opts.skipDuckdb) checks.push(row('DuckDB + extensions', 'skipped', 'skipped by caller'));
+    else checks.push(...(await checkDuckdb()));
+    checks.push(row(
+      'Workspace location',
+      safety.warnings.length > 0 ? 'warn' : 'ok',
+      safety.insideRepo ? (safety.gitRepo ? 'inside the repository, git-ignored' : 'inside the repository (not a git repo)') : 'outside the repository',
+      safety.warnings.length > 0 ? 'see warnings; prefer a folder that is not synced to a cloud provider' : '',
+    ));
 
-  // 3-5. layout, config.yaml, .env, database
-  const layout = workspaceLayout(workspace);
-  const migrationsDir = path.join(root, 'schema', 'migrations');
-  checks.push(ensureLayout(layout));
-  checks.push(...ensureConfigFiles(root));
-  checks.push(migrateWorkspaceDb(layout, migrationsDir, 'Database'));
+    // 3-5. layout, config.yaml, .env, database
+    const layout = workspaceLayout(workspace);
+    const migrationsDir = path.join(root, 'schema', 'migrations');
+    checks.push(ensureLayout(layout));
+    checks.push(...ensureConfigFiles(root));
+    checks.push(migrateWorkspaceDb(layout, migrationsDir, 'Database'));
 
-  // 6. git hooks
-  const hooks = ensureGitHooks(root);
-  if (hooks) checks.push(hooks);
+    // 6. git hooks
+    const hooks = ensureGitHooks(root);
+    if (hooks) checks.push(hooks);
 
-  // 7. demo
-  let demoWorkspace: string | null = null;
-  if (opts.demo) {
-    const demo = setupDemo(root, workspace, migrationsDir);
-    checks.push(...demo.rows);
-    demoWorkspace = demo.demoWorkspace;
-  }
+    // 7. demo
+    let demoWorkspace: string | null = null;
+    if (opts.demo) {
+      const demo = setupDemo(root, workspace, migrationsDir);
+      checks.push(...demo.rows);
+      demoWorkspace = demo.demoWorkspace;
+    }
 
-  return {
-    workspace,
-    demo_workspace: demoWorkspace,
-    ok: !checks.some((c) => c.result === 'fail'),
-    checks,
-    warnings: safety.warnings,
-    next: 'add-source <name>',
-  };
+    return {
+      workspace,
+      demo_workspace: demoWorkspace,
+      ok: !checks.some((c) => c.result === 'fail'),
+      checks,
+      warnings: safety.warnings,
+      next: 'add-source <name>',
+    };
+  });
 }
 
 function renderTable(result: InitResult): string {

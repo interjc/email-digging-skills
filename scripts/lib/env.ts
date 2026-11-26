@@ -39,3 +39,20 @@ export function loadEnv(repoRoot: string): Record<string, string> {
   }
   return parseEnv(text);
 }
+
+/**
+ * Return `text` with KEY set to `value`, editing the assignment the parser reads (the last one for that
+ * key) and nothing else. Appends `KEY=value` when the key is absent. `value` is written as given: callers
+ * pass values that need no quoting (hex keys).
+ */
+export function setEnvValue(text: string, key: string, value: string): string {
+  const lines = text.split('\n');
+  const assignment = new RegExp(`^(\\s*(?:export\\s+)?${key}\\s*=).*?(\\r?)$`);
+  let last = -1;
+  lines.forEach((line, i) => {
+    if (assignment.test(line)) last = i;
+  });
+  if (last === -1) return `${text}${text === '' || text.endsWith('\n') ? '' : '\n'}${key}=${value}\n`;
+  lines[last] = (lines[last] as string).replace(assignment, (_m, head: string, cr: string) => `${head}${value}${cr}`);
+  return lines.join('\n');
+}

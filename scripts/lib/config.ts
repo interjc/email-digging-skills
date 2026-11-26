@@ -6,6 +6,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ConsentBasis, PipelineConfig } from './types.ts';
 import { repoRoot, resolveWorkspace } from './paths.ts';
+import { describeYamlError, sanitizeError, sanitizeText } from './sanitize.ts';
 import type { ResolveOpts } from './paths.ts';
 
 export interface LoadConfigOpts extends ResolveOpts {
@@ -51,11 +52,19 @@ function stringList(v: unknown, label: string, fallback: readonly string[]): str
 
 /** Parse and validate config text (no file access). Returns the config without the workspace path resolved. */
 export function parseConfig(text: string): { config: Omit<PipelineConfig, 'workspace'>; warnings: string[] } {
+  try {
+    return parseConfigUnsafe(text);
+  } catch (err) {
+    throw new Error(sanitizeError(err));
+  }
+}
+
+function parseConfigUnsafe(text: string): { config: Omit<PipelineConfig, 'workspace'>; warnings: string[] } {
   let doc: unknown;
   try {
     doc = parseYaml(text);
   } catch (err) {
-    throw new Error(`config.yaml is not valid YAML: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`config.yaml is not valid YAML (${describeYamlError(err)}).`);
   }
   if (doc === null || doc === undefined) doc = {};
   if (!isRecord(doc)) throw new Error('config.yaml: the top level must be a mapping.');
@@ -64,10 +73,10 @@ export function parseConfig(text: string): { config: Omit<PipelineConfig, 'works
   for (const [key, value] of Object.entries(doc)) {
     const known = KNOWN_KEYS[key];
     if (known === undefined) {
-      warnings.push(`config.yaml: unknown key "${key}" (ignored).`);
+      warnings.push(sanitizeText(`config.yaml: unknown key "${key}" (ignored).`));
     } else if (known !== null && isRecord(value)) {
       for (const sub of Object.keys(value)) {
-        if (!known.includes(sub)) warnings.push(`config.yaml: unknown key "${key}.${sub}" (ignored).`);
+        if (!known.includes(sub)) warnings.push(sanitizeText(`config.yaml: unknown key "${key}.${sub}" (ignored).`));
       }
     }
   }

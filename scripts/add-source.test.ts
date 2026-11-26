@@ -6,7 +6,8 @@ import path from 'node:path';
 import { addSource, guessExportDate } from './add-source.ts';
 import { loadMeta } from './lib/meta.ts';
 import { layoutDirs, workspaceLayout } from './lib/paths.ts';
-import { SJIS, tmpDir, writeFile } from './lib/read/testutil.ts';
+import { SJIS, tmpDir, writeFile, writeSqlite, writeXlsx } from './lib/read/testutil.ts';
+import { withWorkspaceLock } from './lib/lock.ts';
 
 const repo = path.resolve(import.meta.dirname, '..');
 
@@ -184,4 +185,179 @@ test('CLI: prints masked output only; --json is masked too; exit codes', () => {
   const none = spawnSync('node', ['scripts/add-source.ts'], { cwd: repo, encoding: 'utf8' });
   assert.equal(none.status, 1);
   assert.match(none.stderr, /Usage/);
+});
+
+// ---------------------------------------------------------------------------
+// Review R1 rework
+// ---------------------------------------------------------------------------
+
+test('R1-1 (D28): addresses planted in Newsletter, date, locale cells, headers, file and directory names never print', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'members_2025-03-01.csv', [
+    'Email,Name,Created,Locale,Newsletter,hanako.yamada@example.jp Hanako Yamada',
+    'one@example.com,Taro Yamada,leak.date@example.net,leak.locale@example.org,leak.news@example.com,x',
+    'two@example.com,Jiro Sato,2025/3/2,ja,yes,y',
+    'three@example.com,Saburo Ito,2025/3/3,en-US,0,z',
+  ].join('\n') + '\n');
+  writeFile(dir, 'leak.file@example.com.xls', 'not supported'); // email-scan:allow
+  fs.mkdirSync(path.join(dir, 'leak.dir@example.com'));
+
+  const { report } = await addSource('shop-a', { workspace: ws });
+  const planted = /one@example\.com|two@example\.com|three@example\.com|leak\.[a-z]+@example|hanako\.yamada@example\.jp|Taro Yamada|Jiro Sato|Saburo Ito/;
+  assert.doesNotMatch(JSON.stringify(report), planted);
+
+  const cli = (args: string[]) => spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws, ...args], { cwd: repo, encoding: 'utf8' });
+  for (const out of [cli([]), cli(['--json'])]) {
+    assert.equal(out.status, 0, out.stderr);
+    assert.doesNotMatch(out.stdout + out.stderr, planted);
+  }
+  const f = report.files.find((x) => x.file.startsWith('members'))!;
+  assert.deepEqual(f.samples.created_at, ['(unparsed)', '2025/3/2', '2025/3/3']); // an address in a date column shows no value
+  assert.deepEqual(f.samples.locale, ['(other)', 'ja', 'en-US']);
+  assert.deepEqual(f.samples.consent, ['(other)', 'yes', '0']);
+  assert.ok(f.probe?.headers.some((h) => h.includes('h***@e***e.jp')));
+  assert.match(report.confirm.join('\n'), /a header cell contains an address; the header row may be wrong/);
+  // an unprobeable file name with an address is masked in the error line as well
+  assert.match(report.files.map((x) => x.file).join('|'), /l\*\*\*@e\*\*\*e\.com\.xls/);
+});
+
+test('R1-1: a long mistaken header row is shortened in the output', async () => {
+  const { ws, resources } = workspace();
+  writeFile(path.join(resources, 'shop-a'), 'a.csv', `${'Hanako Yamada Ichiro Sato '.repeat(10)},Email\nx,u@example.com\n`);
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.ok(report.files[0]!.probe!.headers[0]!.length <= 60);
+});
+
+test('R1-4: a meta.md that appears while probing is never overwritten (draft goes to meta.draft.md)', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'a.csv', 'Email\na@example.com\n');
+  const written = '---\nsource: shop-a\nkind: event\nfiles:\n  - name: a.csv\n    header_row: 1\nconsent_basis: opt_in\n---\nhand written\n';
+  const orig = fs.writeFileSync;
+  let raced = false;
+  // Simulate another process creating meta.md right before add-source's own exclusive create.
+  (fs as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = ((file: fs.PathOrFileDescriptor, data: unknown, options?: unknown) => {
+    if (!raced && String(file) === path.join(dir, 'meta.md')) {
+      raced = true;
+      orig(file, written);
+    }
+    return (orig as (...a: unknown[]) => void)(file, data, options);
+  }) as typeof fs.writeFileSync;
+  try {
+    const { report } = await addSource('shop-a', { workspace: ws });
+    assert.equal(raced, true);
+    assert.equal(report.meta_is_draft, true);
+    assert.equal(report.meta_file, path.join(dir, 'meta.draft.md'));
+  } finally {
+    (fs as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = orig;
+  }
+  assert.equal(fs.readFileSync(path.join(dir, 'meta.md'), 'utf8'), written);
+  assert.match(fs.readFileSync(path.join(dir, 'meta.draft.md'), 'utf8'), /kind: event/); // the new meta.md's settings are in the draft
+});
+
+test('R1-5: the draft keeps every per-file setting and the explicit settings of an existing meta.md', async () => {
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'pipe.txt', 'Exported\nignored,row\nEmail|Name\na@example.com|A\n');
+  await writeXlsx(path.join(dir, 'book.xlsx'), [['Title'], ['Email', 'Name'], ['b@example.com', 'B']], 'People');
+  await writeSqlite(path.join(dir, 'app.db'), 'people', ['mail'], [['c@example.com']]);
+  writeFile(dir, 'new_2025-05-05.csv', 'Email\nd@example.com\n'); // not in the existing meta
+  const original = [
+    '---', 'source: shop-a', 'kind: product', 'label: Shop A', 'files:',
+    '  - name: pipe.txt', '    encoding: utf-8', '    header_row: 3', '    delimiter: "|"',
+    '  - name: book.xlsx', '    sheet: People', '    header_row: 2',
+    '  - name: app.db', '    query: "select mail as email from people"',
+    'columns:', '  email: Email', 'consent_values:', '  granted: ["済"]', '  denied: ["停止"]',
+    'consent_basis: opt_in', 'exported_at: 2025-01-02', '---', '', 'notes', '',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'meta.md'), original);
+
+  const { report } = await addSource('shop-a', { workspace: ws });
+  assert.equal(report.meta_is_draft, true);
+  assert.equal(fs.readFileSync(path.join(dir, 'meta.md'), 'utf8'), original);
+  assert.deepEqual(report.files.map((f) => f.error), [null, null, null, null]); // nothing failed to probe
+
+  // The draft, used as a meta.md, loads and keeps every setting.
+  const copy = path.join(tmpDir(), 'shop-a');
+  fs.cpSync(dir, copy, { recursive: true });
+  fs.renameSync(path.join(copy, 'meta.draft.md'), path.join(copy, 'meta.md'));
+  const meta = loadMeta(copy);
+  const byName = Object.fromEntries(meta.files.map((f) => [f.name, f]));
+  assert.deepEqual(byName['pipe.txt'], { name: 'pipe.txt', encoding: 'utf-8', header_row: 3, delimiter: '|' });
+  assert.deepEqual(byName['book.xlsx'], { name: 'book.xlsx', encoding: 'auto', header_row: 2, sheet: 'People' });
+  assert.deepEqual(byName['app.db'], { name: 'app.db', encoding: 'auto', header_row: 1, query: 'select mail as email from people' });
+  assert.ok(byName['new_2025-05-05.csv']); // the new file is added with defaults
+  assert.equal(meta.kind, 'product');
+  assert.equal(meta.label, 'Shop A');
+  assert.equal(meta.consent_basis, 'opt_in');
+  assert.equal(meta.exported_at, '2025-01-02');
+  assert.deepEqual(meta.consent_values, { granted: ['済'], denied: ['停止'] });
+  assert.equal(meta.columns.email, 'Email');
+});
+
+test('R1-7: add-source decodes into <workspace>/output/staging/_probe-<pid>/, never the OS temp dir, and cleans up', async () => {
+  const { ws, resources } = workspace();
+  const layout = workspaceLayout(ws);
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'cp.csv', SJIS.mailAddress, ',', SJIS.shimei, '\na@example.com,x\n');
+  writeFile(dir, 'cp2.csv', SJIS.mailAddress, ',', SJIS.shimei, '\nb@example.com,y\n');
+  const decodedWrites: string[] = [];
+  const mkdtemps: string[] = [];
+  const origWrite = fs.writeFileSync;
+  const origMk = fs.mkdtempSync;
+  (fs as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(file).endsWith('.utf8.txt')) decodedWrites.push(String(file));
+    return (origWrite as (...a: unknown[]) => void)(file, ...rest);
+  }) as typeof fs.writeFileSync;
+  (fs as { mkdtempSync: typeof fs.mkdtempSync }).mkdtempSync = ((prefix: string, ...rest: unknown[]) => {
+    mkdtemps.push(prefix);
+    return (origMk as (...a: unknown[]) => string)(prefix, ...rest);
+  }) as typeof fs.mkdtempSync;
+  try {
+    await addSource('shop-a', { workspace: ws });
+  } finally {
+    (fs as { writeFileSync: typeof fs.writeFileSync }).writeFileSync = origWrite;
+    (fs as { mkdtempSync: typeof fs.mkdtempSync }).mkdtempSync = origMk;
+  }
+  assert.ok(decodedWrites.length >= 2);
+  assert.ok(decodedWrites.every((p) => p.startsWith(path.join(layout.staging, '_probe-'))), decodedWrites.join(', '));
+  assert.deepEqual(mkdtemps.filter((p) => p.includes('mail-decoded')), []);
+  assert.deepEqual(fs.readdirSync(layout.staging), []); // removed afterwards
+});
+
+test('R1-8: invalid dates in file names are ignored; D25 asks only about non-UTF-8 or ambiguous encodings', async () => {
+  assert.equal(guessExportDate('export-2025-13-01.csv'), null);
+  assert.equal(guessExportDate('export-2025-00-10.csv'), null);
+  assert.equal(guessExportDate('export-2025-02-29.csv'), null);
+  assert.equal(guessExportDate('export-2024-02-29.csv'), '2024-02-29');
+  const { ws, resources } = workspace();
+  const dir = path.join(resources, 'shop-a');
+  writeFile(dir, 'export-2025-13-01.csv', 'Email\na@example.com\n'); // plain UTF-8, no BOM
+  writeFile(dir, 'bom.csv', [0xef, 0xbb, 0xbf], 'Email\nb@example.com\n');
+  const { report } = await addSource('shop-a', { workspace: ws });
+  const plain = report.files.find((f) => f.file === 'export-2025-13-01.csv');
+  assert.equal(plain?.probe?.encodingHow, 'detected');
+  assert.equal(plain?.probe?.encoding, 'utf-8');
+  assert.doesNotMatch(report.confirm.join('\n'), /encoding detected/); // reported, but not asked about
+  assert.doesNotMatch(report.confirm.join('\n'), /exported_at/);
+  assert.equal(loadMeta(dir).exported_at, null);
+});
+
+test('R1-9 (D26): add-source holds the workspace lock; a held lock stops it with a precondition error', async () => {
+  const { ws, resources } = workspace();
+  writeFile(path.join(resources, 'shop-a'), 'a.csv', 'Email\na@example.com\n');
+  await withWorkspaceLock(ws, 'clean-and-merge', async () => {
+    await assert.rejects(addSource('shop-a', { workspace: ws }), /in use by "clean-and-merge"/);
+    const r = spawnSync('node', ['scripts/add-source.ts', 'shop-a', '--workspace', ws], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 2);
+  });
+  assert.ok(!fs.existsSync(path.join(ws, '.lock')));
+  await addSource('shop-a', { workspace: ws });
+  assert.ok(!fs.existsSync(path.join(ws, '.lock'))); // released afterwards
+  // two at once: exactly one wins
+  fs.rmSync(path.join(resources, 'shop-a', 'meta.md'));
+  const results = await Promise.allSettled([addSource('shop-a', { workspace: ws }), addSource('shop-a', { workspace: ws })]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.match(String((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason), /in use/);
 });

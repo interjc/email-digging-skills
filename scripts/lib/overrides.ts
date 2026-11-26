@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { ConsentStatus, Overrides, SuppressionReason } from './types.ts';
+import { describeYamlError, sanitizeError } from './sanitize.ts';
 
 const SUPPRESSION_REASONS: readonly SuppressionReason[] = ['unsubscribed', 'bounced', 'complained', 'manual'];
 const CONSENT_STATUSES: readonly ConsentStatus[] = ['granted', 'denied', 'unknown'];
@@ -24,7 +25,8 @@ function readList(file: string): Entry[] {
   try {
     doc = parseYaml(text);
   } catch (err) {
-    throw new Error(`${name} is not valid YAML: ${err instanceof Error ? err.message : String(err)}`);
+    // The parser's own message quotes the offending source line (which may hold an address): report position only.
+    throw new Error(`${name} is not valid YAML (${describeYamlError(err)}).`);
   }
   if (doc === null || doc === undefined) return [];
   if (!Array.isArray(doc)) throw new Error(`${name}: expected a list of entries at the top level.`);
@@ -65,7 +67,16 @@ function withNote<T extends object>(base: T, note: string | undefined): T & { no
   return note === undefined ? base : { ...base, note };
 }
 
+/** Load the four override files. Error messages never contain file content (D28). */
 export function loadOverrides(dir: string): Overrides {
+  try {
+    return loadOverridesUnsafe(dir);
+  } catch (err) {
+    throw new Error(sanitizeError(err));
+  }
+}
+
+function loadOverridesUnsafe(dir: string): Overrides {
   const typoFile = 'typo-decisions.yaml';
   const typo = readList(path.join(dir, typoFile)).map((e, i) => {
     const action = oneOf(str(e, 'action', typoFile, i, true), ['accept', 'reject'] as const, 'action', typoFile, i);

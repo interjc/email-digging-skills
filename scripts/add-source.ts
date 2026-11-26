@@ -5,8 +5,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ColumnMapping, FileProbe, MetaFile, SourceMeta } from './lib/types.ts';
+import type { ColumnMapping, FileProbe, MetaFile, SourceMeta, StandardField } from './lib/types.ts';
 import { EXIT } from './lib/types.ts';
+import { PreconditionError } from './lib/errors.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
 import { requireWorkspace, workspaceLayout } from './lib/paths.ts';
 import { loadMeta, listSourceDir, renderMetaDraft, SOURCE_NAME_RE } from './lib/meta.ts';
@@ -15,6 +16,11 @@ import { probeFile, readRows } from './lib/read/index.ts';
 import { findDuplicates } from './lib/read/duplicates.ts';
 import { REVIEW_THRESHOLD } from './lib/read/synonyms.ts';
 import { maskValue } from './lib/mask.ts';
+import { sanitizeError, sanitizeText } from './lib/sanitize.ts';
+import { withWorkspaceLock } from './lib/lock.ts';
+import { makeConsentMatcher } from './lib/read/consent.ts';
+import type { ConsentMatcher } from './lib/read/consent.ts';
+import { parseDate } from './lib/read/dates.ts';
 
 export interface AddSourceFileReport {
   file: string;
@@ -38,35 +44,83 @@ export interface AddSourceReport {
   warnings: string[];
 }
 
-/** `YYYY-MM-DD` in a file name, if it is a real date. */
+/** `YYYY-MM-DD` in a file name; null when there is none or it is not a real date (never throws). */
 export function guessExportDate(fileName: string): string | null {
   const m = /(\d{4})-(\d{2})-(\d{2})/.exec(fileName);
   if (!m) return null;
-  const s = m[0];
-  return new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s ? s : null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1 || d > new Date(Date.UTC(y, mo, 0)).getUTCDate()) return null;
+  return m[0];
 }
 
-async function maskedSamples(file: string, meta: MetaFile, probe: FileProbe): Promise<Record<string, string[]>> {
+const LOCALE_SHAPE = /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$/;
+
+/**
+ * One sample value as it may be printed (D28): masked by field, shape-limited for fields that should
+ * hold dates, locales or consent words (an address in the wrong column never shows), then sanitized.
+ */
+function displaySample(field: StandardField, value: string, consent: ConsentMatcher): string {
+  let shown: string;
+  switch (field) {
+    case 'email':
+    case 'name':
+      shown = maskValue(field, value);
+      break;
+    case 'created_at':
+    case 'last_seen_at':
+      shown = parseDate(value) !== null ? value : '(unparsed)';
+      break;
+    case 'locale':
+      shown = LOCALE_SHAPE.test(value.trim()) ? value.trim() : '(other)';
+      break;
+    default:
+      shown = consent(value) !== 'unknown' ? value.trim() : '(other)';
+  }
+  return sanitizeText(shown);
+}
+
+/** Header text for output: sanitized and shortened (a mistaken header row can hold a whole record). */
+function displayHeader(h: string): string {
+  const clean = sanitizeText(h);
+  return clean.length > 60 ? `${clean.slice(0, 57)}...` : clean;
+}
+
+async function maskedSamples(file: string, meta: MetaFile, probe: FileProbe, consent: ConsentMatcher, decodedDir: string): Promise<Record<string, string[]>> {
   const mapped = probe.mappings.filter((m): m is ColumnMapping & { column: string } => m.column !== null);
   const out: Record<string, string[]> = Object.fromEntries(mapped.map((m) => [m.field, []]));
   if (mapped.length === 0) return out;
-  for await (const { cells } of readRows(file, meta, probe)) {
+  for await (const { cells } of readRows(file, meta, probe, { decodedDir })) {
     for (const m of mapped) {
       const bucket = out[m.field] as string[];
       const v = cells[m.column];
-      if (bucket.length < 3 && v !== null && v !== undefined && v.trim() !== '') bucket.push(maskValue(m.field, v));
+      if (bucket.length < 3 && v !== null && v !== undefined && v.trim() !== '') bucket.push(displaySample(m.field, v, consent));
     }
     if (mapped.every((m) => (out[m.field] as string[]).length >= 3)) break;
   }
   return out;
 }
 
+/** Copy of a probe that is safe to print: headers and mapped column names sanitized. */
+function printableProbe(p: FileProbe): FileProbe {
+  return {
+    ...p,
+    headers: p.headers.map(displayHeader),
+    mappings: p.mappings.map((m) => ({ ...m, column: m.column === null ? null : displayHeader(m.column) })),
+  };
+}
+
 export async function addSource(name: string, opts: { workspace?: string | null } = {}): Promise<{ report: AddSourceReport; workspaceWarnings: string[] }> {
   if (!SOURCE_NAME_RE.test(name)) {
-    throw new Error(`invalid source name "${name}": use lowercase letters, digits and single hyphens (e.g. product-a, event-2023-tokyo)`);
+    throw new Error(`invalid source name "${sanitizeText(name)}": use lowercase letters, digits and single hyphens (e.g. product-a, event-2023-tokyo)`);
   }
   const info = requireWorkspace({ workspace: opts.workspace });
   const layout = workspaceLayout(info.workspace);
+  // D26: one mutating command at a time per workspace.
+  const report = await withWorkspaceLock(info.workspace, 'add-source', () => addSourceLocked(name, layout));
+  return { report, workspaceWarnings: info.warnings };
+}
+
+async function addSourceLocked(name: string, layout: ReturnType<typeof workspaceLayout>): Promise<AddSourceReport> {
   const dir = path.join(layout.resources, name);
   const report: AddSourceReport = {
     source: name, dir, created_dir: false, meta_file: null, meta_is_draft: false,
@@ -76,104 +130,137 @@ export async function addSource(name: string, opts: { workspace?: string | null 
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
     report.created_dir = true;
-    return { report, workspaceWarnings: info.warnings };
+    return report;
   }
 
   const listing = listSourceDir(dir);
-  report.subdirs_ignored = listing.subdirs;
-  for (const d of listing.subdirs) report.warnings.push(`subdirectory ignored: ${d}/`);
+  report.subdirs_ignored = listing.subdirs.map(sanitizeText);
+  for (const d of listing.subdirs) report.warnings.push(sanitizeText(`subdirectory ignored: ${d}/`));
 
-  // Existing meta.md (if valid) supplies per-file settings and column names for the probe.
+  // Existing meta.md (if valid) supplies per-file settings and column names for the probe and the draft.
   const metaPath = path.join(dir, 'meta.md');
-  const hasMeta = fs.existsSync(metaPath);
   let existing: SourceMeta | null = null;
-  if (hasMeta) {
+  if (fs.existsSync(metaPath)) {
     try {
       existing = loadMeta(dir);
     } catch (err) {
-      report.warnings.push(`existing meta.md is not usable, probing with defaults: ${(err as Error).message.split('\n').slice(0, 3).join(' ')}`);
+      report.warnings.push(`existing meta.md is not usable, probing with defaults: ${sanitizeText((err as Error).message.split('\n').slice(0, 3).join(' '))}`);
     }
   }
 
-  const probed: Array<{ name: string; path: string; meta: MetaFile; probe: FileProbe }> = [];
-  for (const fileName of listing.files) {
-    const filePath = path.join(dir, fileName);
-    const mf: MetaFile = existing?.files.find((f) => f.name === fileName) ?? { name: fileName, encoding: 'auto' };
-    const entry: AddSourceFileReport = { file: fileName, probe: null, error: null, duplicate_of: null, samples: {} };
-    try {
-      entry.probe = await probeFile(filePath, mf, { columns: existing?.columns });
-      probed.push({ name: fileName, path: filePath, meta: mf, probe: entry.probe });
-    } catch (err) {
-      entry.error = (err as Error).message;
-    }
-    report.files.push(entry);
-  }
-
-  // R9: suspected duplicates.
-  let duplicates = new Map<string, string>();
+  // R1-7: decode into the workspace, never the OS temp dir; removed afterwards.
+  const decodedDir = path.join(layout.staging, `_probe-${process.pid}`);
+  fs.mkdirSync(decodedDir, { recursive: true });
   try {
-    duplicates = await findDuplicates(probed);
-  } catch (err) {
-    report.warnings.push(`duplicate check failed: ${(err as Error).message}`);
-  }
-  for (const f of report.files) f.duplicate_of = duplicates.get(f.file) ?? null;
-
-  // Masked samples for the files that stay listed.
-  for (const f of report.files) {
-    if (f.probe && f.duplicate_of === null) {
-      const p = probed.find((x) => x.name === f.file) as (typeof probed)[number];
+    const consent = makeConsentMatcher(existing?.consent_values);
+    const probed: Array<{ name: string; path: string; meta: MetaFile; probe: FileProbe }> = [];
+    const entries: AddSourceFileReport[] = []; // printable
+    for (const fileName of listing.files) {
+      const filePath = path.join(dir, fileName);
+      const mf: MetaFile = existing?.files.find((f) => f.name === fileName) ?? { name: fileName, encoding: 'auto' };
+      const entry: AddSourceFileReport = { file: sanitizeText(fileName), probe: null, error: null, duplicate_of: null, samples: {} };
       try {
-        f.samples = await maskedSamples(p.path, p.meta, f.probe);
+        const probe = await probeFile(filePath, mf, { columns: existing?.columns, decodedDir });
+        probed.push({ name: fileName, path: filePath, meta: mf, probe });
+        entry.probe = printableProbe(probe);
+        if (probe.headers.some((h) => h.includes('@') || h.includes('＠'))) {
+          report.confirm.push(sanitizeText(`${fileName}: a header cell contains an address; the header row may be wrong (check header_row)`));
+        }
       } catch (err) {
-        report.warnings.push(`${f.file}: could not read samples: ${(err as Error).message}`);
+        entry.error = sanitizeText((err as Error).message);
+      }
+      entries.push(entry);
+    }
+    report.files = entries;
+    const rawByName = new Map(probed.map((p) => [p.name, p]));
+    const nameOf = (i: number) => listing.files[i] as string;
+
+    // R9: suspected duplicates.
+    let duplicates = new Map<string, string>();
+    try {
+      duplicates = await findDuplicates(probed, decodedDir);
+    } catch (err) {
+      report.warnings.push(`duplicate check failed: ${sanitizeText((err as Error).message)}`);
+    }
+    entries.forEach((e, i) => { e.duplicate_of = duplicates.has(nameOf(i)) ? sanitizeText(duplicates.get(nameOf(i)) as string) : null; });
+
+    // Masked samples for the files that stay listed.
+    for (const [i, e] of entries.entries()) {
+      const p = rawByName.get(nameOf(i));
+      if (p && e.duplicate_of === null) {
+        try {
+          e.samples = await maskedSamples(p.path, p.meta, p.probe, consent, decodedDir);
+        } catch (err) {
+          report.warnings.push(sanitizeText(`${nameOf(i)}: could not read samples: ${(err as Error).message}`));
+        }
       }
     }
-  }
 
-  // Draft.
-  const listed = report.files.filter((f) => f.duplicate_of === null);
-  const firstProbed = listed.find((f) => f.probe !== null);
-  const dates = listed.map((f) => guessExportDate(f.file)).filter((d): d is string => d !== null).sort();
-  const exportedAt = dates.length > 0 ? (dates[dates.length - 1] as string) : null;
-  const draftFiles: DraftFile[] = report.files.map((f) => ({
-    name: f.file, probe: f.probe, error: f.error ?? undefined, duplicateOf: f.duplicate_of ?? undefined,
-  }));
-  const text = renderMetaDraft({
-    source: name, kind: existing?.kind, files: draftFiles, exportedAt,
-    mappings: firstProbed?.probe?.mappings ?? [],
-  });
-  const out = hasMeta ? path.join(dir, 'meta.draft.md') : metaPath;
-  if (listing.files.length > 0) {
-    fs.writeFileSync(out, text);
-    report.meta_file = out;
-    report.meta_is_draft = hasMeta;
-  }
-
-  // What the human must confirm.
-  for (const f of report.files) {
-    const p = f.probe;
-    if (f.error) report.confirm.push(`${f.file}: could not be read (${f.error.split('\n')[0]}); fix it or leave it out`);
-    if (!p) continue;
-    if (f.duplicate_of !== null) {
-      report.confirm.push(`${f.file}: suspected duplicate of ${f.duplicate_of} (same headers and rows); commented out in the draft, confirm`);
-      continue;
-    }
-    if (p.encodingHow === 'detected' && (p.encoding !== 'utf-8' || p.encodingCandidates.length > 1)) {
-      report.confirm.push(`${f.file}: encoding detected as ${p.encoding} (candidates: ${p.encodingCandidates.join(', ')}); confirm and set it in meta.md`);
-    }
-    for (const m of p.mappings) {
-      if (m.column === null && m.field === 'email') report.confirm.push(`${f.file}: no email column found; set \`columns.email\` in meta.md`);
-      else if (m.column !== null && m.confidence < REVIEW_THRESHOLD) {
-        report.confirm.push(`${f.file}: ${m.field} → "${m.column}" is a guess (${m.how}, ${m.confidence}); confirm`);
+    // Draft (raw column names: it is a file inside the workspace; only printed text is sanitized).
+    const listedNames = listing.files.filter((n) => !duplicates.has(n));
+    const first = listedNames.map((n) => rawByName.get(n)).find((x) => x !== undefined);
+    const dates = listedNames.map(guessExportDate).filter((d): d is string => d !== null).sort();
+    const exportedAt = dates.length > 0 ? (dates[dates.length - 1] as string) : null;
+    const render = (ex: SourceMeta | null): string => renderMetaDraft({
+      source: name, kind: ex?.kind, existing: ex, exportedAt,
+      mappings: first?.probe.mappings ?? [],
+      files: listing.files.map((n, i) => ({
+        name: n, probe: rawByName.get(n)?.probe ?? null, error: entries[i]?.error ?? undefined,
+        duplicateOf: duplicates.get(n), settings: ex?.files.find((f) => f.name === n),
+      })),
+    });
+    if (listing.files.length > 0) {
+      // R1-4: create meta.md exclusively; if it appeared meanwhile (or existed), the draft goes elsewhere.
+      let wroteMeta = false;
+      if (existing === null && !fs.existsSync(metaPath)) {
+        try {
+          fs.writeFileSync(metaPath, render(null), { flag: 'wx' });
+          wroteMeta = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        }
+      }
+      if (wroteMeta) {
+        report.meta_file = metaPath;
+      } else {
+        if (existing === null && fs.existsSync(metaPath)) {
+          try { existing = loadMeta(dir); } catch { /* keep defaults */ }
+        }
+        const draftPath = path.join(dir, 'meta.draft.md');
+        fs.writeFileSync(draftPath, render(existing));
+        report.meta_file = draftPath;
+        report.meta_is_draft = true;
       }
     }
+
+    // What the human must confirm (D25).
+    entries.forEach((e) => {
+      const p = e.probe;
+      if (e.error) report.confirm.push(`${e.file}: could not be read (${e.error.split('\n')[0]}); fix it or leave it out`);
+      if (!p) return;
+      if (e.duplicate_of !== null) {
+        report.confirm.push(`${e.file}: suspected duplicate of ${e.duplicate_of} (same headers and rows); commented out in the draft, confirm`);
+        return;
+      }
+      if (p.encodingHow === 'detected' && (p.encoding !== 'utf-8' || p.encodingCandidates.length > 1)) {
+        report.confirm.push(`${e.file}: encoding detected as ${p.encoding} (candidates: ${p.encodingCandidates.join(', ')}); confirm and set it in meta.md`);
+      }
+      for (const m of p.mappings) {
+        if (m.column === null && m.field === 'email') report.confirm.push(`${e.file}: no email column found; set \`columns.email\` in meta.md`);
+        else if (m.column !== null && m.confidence < REVIEW_THRESHOLD) {
+          report.confirm.push(`${e.file}: ${m.field} → "${m.column}" is a guess (${m.how}, ${m.confidence}); confirm`);
+        }
+      }
+    });
+    if (listing.files.length === 0) report.warnings.push('no data files found in the directory');
+    else {
+      if (!existing) report.confirm.push('consent_basis (opt_in / transactional / unknown): written as unknown; set it from how the data was collected');
+      if (exportedAt && !existing?.exported_at) report.confirm.push(`exported_at: guessed ${exportedAt} from a file name; confirm`);
+    }
+    return report;
+  } finally {
+    fs.rmSync(decodedDir, { recursive: true, force: true });
   }
-  if (listing.files.length === 0) report.warnings.push('no data files found in the directory');
-  else {
-    report.confirm.push('consent_basis (opt_in / transactional / unknown): written as unknown; set it from how the data was collected');
-    if (exportedAt) report.confirm.push(`exported_at: guessed ${exportedAt} from a file name; confirm`);
-  }
-  return { report, workspaceWarnings: info.warnings };
 }
 
 function render(r: AddSourceReport): string {
@@ -210,7 +297,14 @@ async function main(): Promise<number> {
     process.stderr.write('Usage: node scripts/add-source.ts <name> [--workspace <path>] [--json]\n');
     return EXIT.ERROR;
   }
-  const { report, workspaceWarnings } = await addSource(name, { workspace: values.workspace as string | undefined });
+  let result: Awaited<ReturnType<typeof addSource>>;
+  try {
+    result = await addSource(name, { workspace: values.workspace as string | undefined });
+  } catch (err) {
+    if (err instanceof PreconditionError) throw err;
+    throw new Error(sanitizeError(err)); // D28: nothing thrown may carry an address
+  }
+  const { report, workspaceWarnings } = result;
   if (values.json === true) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {

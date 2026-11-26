@@ -135,3 +135,39 @@ test('backupDb prunes the oldest backups beyond keep, ignores unrelated files, h
     'mail-list-20260101T000003Z.sqlite', 'mail-list-20260101T000004Z-1.sqlite', 'mail-list-20260101T000004Z.sqlite',
   ]);
 });
+
+test('backupDb: 12 backups in the same second with keep=5 keep the newest five, including the one just made', () => {
+  const dir = tmpDir();
+  const backups = path.join(dir, 'backups');
+  const dbPath = path.join(dir, 'a.sqlite');
+  const db = openDb(dbPath);
+  migrate(db, MIGRATIONS);
+  db.close();
+  const now = new Date('2026-01-01T00:00:00Z');
+  const made: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    const out = backupDb(dbPath, backups, 5, now) as string;
+    made.push(path.basename(out));
+    assert.ok(fs.existsSync(out), `backup ${i + 1} must survive its own pruning`);
+  }
+  assert.deepEqual(fs.readdirSync(backups).sort(), made.slice(-5).sort());
+  // numeric, not lexicographic: -10 and -11 are newer than -2
+  assert.ok(String(made.at(-1)).endsWith('-11.sqlite'), String(made.at(-1)));
+});
+
+test('backupDb: older timestamps are pruned before newer same-second suffixes', () => {
+  const dir = tmpDir();
+  const backups = path.join(dir, 'backups');
+  const dbPath = path.join(dir, 'a.sqlite');
+  const db = openDb(dbPath);
+  migrate(db, MIGRATIONS);
+  db.close();
+  fs.mkdirSync(backups);
+  for (const f of ['mail-list-20260101T000001Z-9.sqlite', 'mail-list-20260101T000002Z.sqlite', 'mail-list-20260101T000002Z-10.sqlite']) {
+    fs.writeFileSync(path.join(backups, f), '');
+  }
+  const out = backupDb(dbPath, backups, 3, new Date('2026-01-01T00:00:03Z')) as string;
+  assert.deepEqual(fs.readdirSync(backups).sort(), [
+    'mail-list-20260101T000002Z-10.sqlite', 'mail-list-20260101T000002Z.sqlite', path.basename(out),
+  ].sort());
+});

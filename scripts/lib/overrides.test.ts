@@ -50,3 +50,29 @@ test('invalid entries are rejected with file name and entry number', () => {
   assert.throws(() => bad('exclude.yaml', '- just a string\n'), /entry 1 must be a mapping/);
   assert.throws(() => bad('exclude.yaml', ': : :\n  - [\n'), /not valid YAML/);
 });
+
+test('errors never echo file content: a malformed YAML line holding an address is reported by position only (D28)', () => {
+  const bad: Record<string, string> = {
+    'typo-decisions.yaml': '- email: leak@example.com\n  action: [unclosed\n',
+    'suppressions.yaml': 'leak@example.com\n',
+    'consents.yaml': '- email: leak@example.com\n  source: s\n  status: leak@example.org\n',
+    'exclude.yaml': '- email: leak@example.com\n  pattern: "leak*@example.net"\n',
+    'typo-decisions-2': '',
+  };
+  for (const [name, text] of Object.entries(bad)) {
+    if (!name.endsWith('.yaml')) continue;
+    let message = '';
+    try {
+      loadOverrides(tmp({ [name]: text }));
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    assert.notEqual(message, '', `${name} should throw`);
+    assert.ok(!message.includes('leak'), `${name}: ${message}`);
+    assert.ok(message.includes(name), message);
+  }
+  assert.match(
+    (() => { try { loadOverrides(tmp({ 'typo-decisions.yaml': '- a: [unclosed\n' })); return ''; } catch (e) { return (e as Error).message; } })(),
+    /typo-decisions\.yaml is not valid YAML \(.* at line \d+, column \d+\)/,
+  );
+});

@@ -46,3 +46,20 @@ test('loadEnv never writes values to stdout/stderr', () => {
   }
   assert.ok(!chunks.join('').includes('hunter2'));
 });
+
+import { setEnvValue } from './env.ts';
+
+test('setEnvValue edits only the last assignment of the key (the one parseEnv reads)', () => {
+  const text = '# top\nK=first\nOTHER=1\nK=\nTAIL=2\n';
+  const next = setEnvValue(text, 'K', 'new');
+  assert.equal(next, '# top\nK=first\nOTHER=1\nK=new\nTAIL=2\n');
+  assert.equal(parseEnv(next).K, 'new');
+});
+
+test('setEnvValue: quoted empty value, export prefix, CRLF, absent key', () => {
+  assert.equal(setEnvValue('export K=""\n', 'K', 'v'), 'export K=v\n');
+  assert.equal(setEnvValue('K=\r\nZ=1\r\n', 'K', 'v'), 'K=v\r\nZ=1\r\n');
+  assert.equal(setEnvValue('A=1', 'K', 'v'), 'A=1\nK=v\n');
+  assert.equal(setEnvValue('', 'K', 'v'), 'K=v\n');
+  assert.equal(setEnvValue('K2=x\n', 'K', 'v'), 'K2=x\nK=v\n', 'a longer key name is not the key');
+});

@@ -68,7 +68,7 @@ export function backupStamp(d: Date = new Date()): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
-const BACKUP_FILE = /^mail-list-\d{8}T\d{6}Z(?:-\d+)?\.sqlite$/;
+const BACKUP_FILE = /^mail-list-(\d{8}T\d{6}Z)(?:-(\d+))?\.sqlite$/;
 
 /**
  * Copy the database with `VACUUM INTO` to `<backupsDir>/mail-list-<UTC stamp>.sqlite`, then delete the
@@ -79,8 +79,14 @@ export function backupDb(dbPath: string, backupsDir: string, keep: number, now: 
   fs.mkdirSync(backupsDir, { recursive: true });
 
   const stamp = backupStamp(now);
-  let target = path.join(backupsDir, `mail-list-${stamp}.sqlite`);
-  for (let n = 1; fs.existsSync(target); n++) target = path.join(backupsDir, `mail-list-${stamp}-${n}.sqlite`);
+  // Same-second backups get the next number after the highest one present (not the first free name:
+  // pruning may have removed the unsuffixed one, and reusing it would make a new backup look oldest).
+  let highest = -1;
+  for (const f of fs.readdirSync(backupsDir)) {
+    const m = BACKUP_FILE.exec(f);
+    if (m && m[1] === stamp) highest = Math.max(highest, m[2] === undefined ? 0 : Number(m[2]));
+  }
+  const target = path.join(backupsDir, highest < 0 ? `mail-list-${stamp}.sqlite` : `mail-list-${stamp}-${highest + 1}.sqlite`);
 
   const db = openDb(dbPath, { readonly: true });
   try {
@@ -89,11 +95,20 @@ export function backupDb(dbPath: string, backupsDir: string, keep: number, now: 
     db.close();
   }
 
-  // Names sort chronologically (fixed-width UTC stamp; the -N suffix only breaks same-second ties).
-  const stem = (f: string) => f.slice(0, -'.sqlite'.length);
-  const backups = fs.readdirSync(backupsDir).filter((f) => BACKUP_FILE.test(f)).sort((a, b) => (stem(a) < stem(b) ? -1 : 1));
+  // Oldest first: by timestamp, then by the same-second suffix as a number (-10 is newer than -2;
+  // a name without suffix is the first of its second). Never delete the backup just created.
+  const order = (f: string): [string, number] => {
+    const m = BACKUP_FILE.exec(f);
+    return [m?.[1] ?? '', m?.[2] === undefined ? 0 : Number(m[2])];
+  };
+  const backups = fs.readdirSync(backupsDir).filter((f) => BACKUP_FILE.test(f)).sort((a, b) => {
+    const [ta, na] = order(a);
+    const [tb, nb] = order(b);
+    return ta === tb ? na - nb : ta < tb ? -1 : 1;
+  });
   const excess = backups.length - Math.max(1, keep);
-  for (const old of backups.slice(0, Math.max(0, excess))) fs.rmSync(path.join(backupsDir, old), { force: true });
+  const doomed = backups.slice(0, Math.max(0, excess)).filter((f) => path.join(backupsDir, f) !== target);
+  for (const old of doomed) fs.rmSync(path.join(backupsDir, old), { force: true });
 
   return target;
 }

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { FileProbe, MetaFile, SourceMeta } from '../types.ts';
 import { decodeBytes } from './decode.ts';
+import { sanitizeText } from '../sanitize.ts';
 import type { DecodeResult } from './decode.ts';
 import { detectColumns } from './synonyms.ts';
 import { formatOf, isTextFormat, openTable, writeDecoded } from './table.ts';
@@ -59,7 +60,22 @@ function prepare(file: string, format: ReturnType<typeof formatOf>, meta: MetaFi
   };
 }
 
+/** Errors can quote file content (CSV parse errors do): every message leaves here sanitized (D28). */
+function sanitized(err: unknown): Error {
+  const out = new Error(sanitizeText(err instanceof Error ? err.message : String(err)));
+  if (err instanceof Error) out.name = err.name;
+  return out;
+}
+
 export async function probeFile(file: string, metaFile?: MetaFile, opts: ProbeOptions = {}): Promise<FileProbe> {
+  try {
+    return await probeFileUnsafe(file, metaFile, opts);
+  } catch (err) {
+    throw sanitized(err);
+  }
+}
+
+async function probeFileUnsafe(file: string, metaFile: MetaFile | undefined, opts: ProbeOptions): Promise<FileProbe> {
   const meta: MetaFile = metaFile ?? { name: path.basename(file), encoding: 'auto' };
   const format = formatOf(file);
   if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`);
@@ -97,6 +113,14 @@ export async function probeFile(file: string, metaFile?: MetaFile, opts: ProbeOp
 
 /** Read every data row as strings, keyed by header. The encoding comes from the probe. */
 export async function* readRows(file: string, metaFile: MetaFile, probe: FileProbe, opts: ReadOptions = {}): AsyncGenerator<RowRecord> {
+  try {
+    yield* readRowsUnsafe(file, metaFile, probe, opts);
+  } catch (err) {
+    throw sanitized(err);
+  }
+}
+
+async function* readRowsUnsafe(file: string, metaFile: MetaFile, probe: FileProbe, opts: ReadOptions): AsyncGenerator<RowRecord> {
   const format = formatOf(file);
   const prep = prepare(file, format, metaFile, opts, probe.encoding ?? undefined);
   let table: OpenTable | null = null;

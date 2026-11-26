@@ -354,3 +354,47 @@ test('fixtures: form-eta month-name dates (R5 addendum) land in created_at', { s
   assert.ok(rows.some((x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x.created_at))), 'one date-only value');
   assert.ok(rows.some((x) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00$/.test(String(x.created_at))), 'datetime values');
 });
+
+// ---------------------------------------------------------------------------
+// Review R1 rework
+// ---------------------------------------------------------------------------
+
+test('R1-3 (D26): concurrent staging of the same source always leaves a complete directory', async () => {
+  const dir = sourceDir('shop-a');
+  writeFile(dir, 'a.csv', 'email\n' + Array.from({ length: 300 }, (_, i) => `u${i}@example.com`).join('\n') + '\n');
+  const staging = tmpDir();
+  for (let round = 0; round < 3; round++) {
+    const results = await Promise.all(Array.from({ length: 5 }, () => stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES })));
+    assert.ok(results.every((r) => r.staged_rows === 300 && r.dir === path.join(staging, 'shop-a')));
+    assert.deepEqual(fs.readdirSync(path.join(staging, 'shop-a')).sort(), ['rejected.parquet', 'rows.parquet', 'stats.json']);
+    assert.deepEqual(fs.readdirSync(staging), ['shop-a']); // no temp directories left behind
+    assert.equal((await parquet(path.join(staging, 'shop-a', 'rows.parquet'))).length, 300);
+  }
+});
+
+test('R1-3: a failing stage leaves the previous staged directory intact and no temp directory', async () => {
+  const dir = sourceDir('shop-a');
+  writeFile(dir, 'a.csv', 'email\na@example.com\n');
+  const staging = tmpDir();
+  const ok = await stageSource(makeMeta(dir), { stagingDir: staging, overrides: NO_OVERRIDES });
+  writeFile(dir, 'b.csv', 'foo,bar\nplain,text\n');
+  const broken = makeMeta(dir, { files: [{ name: 'a.csv', encoding: 'auto' }, { name: 'b.csv', encoding: 'auto' }] });
+  await assert.rejects(stageSource(broken, { stagingDir: staging, overrides: NO_OVERRIDES }), /no email column/);
+  assert.deepEqual(fs.readdirSync(staging), ['shop-a']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ok.dir, 'stats.json'), 'utf8')), ok);
+  assert.equal((await parquet(path.join(ok.dir, 'rows.parquet'))).length, 1);
+});
+
+test('R1-1 (D28): the "no email column" error masks an address found in a header', async () => {
+  const dir = sourceDir();
+  // the header row is a data row by mistake: an address and a full name in the headers, no email column found
+  writeFile(dir, 'a.csv', 'Hanako Yamada,plain-value\nx,y\n');
+  writeFile(dir, 'b.csv', 'hanako.yamada@example.jp,note\nx,y\n');
+  const meta = makeMeta(dir, { files: [{ name: 'b.csv', encoding: 'auto' }], columns: { email: 'nothing-like-this' } });
+  // content sniff cannot rescue it (no '@' in the data), so staging must fail
+  await assert.rejects(stageSource(meta, { stagingDir: tmpDir(), overrides: NO_OVERRIDES }), (err: Error) => {
+    assert.doesNotMatch(err.message, /hanako\.yamada@example\.jp/);
+    assert.match(err.message, /h\*\*\*@e\*\*\*e\.jp/);
+    return true;
+  });
+});
