@@ -20,7 +20,8 @@ import { withWorkspaceLock } from './lib/lock.ts';
 import { openDb } from './lib/db.ts';
 import { loadOverrides } from './lib/overrides.ts';
 import { normalizeOverrideEmail } from './lib/merge.ts';
-import { autoEncodings, lowConfidenceMappings, writeFileAtomic } from './lib/report.ts';
+import { autoEncodings, lowConfidenceMappings, sanitizeDeep } from './lib/report.ts';
+import { writeFileInWorkspace } from './lib/fsafe.ts';
 import type { FullRunReport } from './lib/report.ts';
 import { maskEmail } from './lib/mask.ts';
 import { sanitizeText } from './lib/sanitize.ts';
@@ -71,6 +72,26 @@ function exactStage(stagingDir: string, fromReport: SourceStageResult[]): Source
   });
 }
 
+/**
+ * When the newest successful merge has no report (its publication failed after the commit), the report
+ * on disk belongs to an older run: refuse to review it (exit 2) and say how to recover (D32).
+ */
+function assertLatestRunHasReport(dbPath: string): void {
+  const db = openDb(dbPath, { readonly: true });
+  let row: { id: string; report_path: string | null } | undefined;
+  try {
+    row = db.prepare("SELECT id, report_path FROM runs WHERE command = 'clean-and-merge' AND status = 'ok' ORDER BY started_at DESC, id DESC LIMIT 1").get() as typeof row;
+  } finally {
+    db.close();
+  }
+  if (row && row.report_path === null) {
+    throw new PreconditionError(
+      `The latest merge (run ${row.id}) was committed but its report could not be written; the report on disk is older.`,
+      'fix the cause and run clean-and-merge again (merges are full and idempotent).',
+    );
+  }
+}
+
 function loadMetas(resources: string, names: string[]): SourceMeta[] {
   const out: SourceMeta[] = [];
   for (const n of names) {
@@ -97,6 +118,7 @@ function reviewLocked(info: WorkspaceInfo): ReviewResult {
     throw new PreconditionError(`No report yet (${latest} is missing).`, 'run clean-and-merge first.');
   }
   const report = JSON.parse(fs.readFileSync(latest, 'utf8')) as FullRunReport;
+  assertLatestRunHasReport(layout.dbPath);
   const overrides = loadOverrides(layout.overrides);
   const decided = new Set(overrides.typo.map((t) => normalizeOverrideEmail(t.email)));
   const stage = exactStage(layout.staging, report.stage ?? []);
@@ -151,7 +173,7 @@ function reviewLocked(info: WorkspaceInfo): ReviewResult {
     other_warnings: warnings.filter((w) => !OVERRIDE_FILE.test(w)),
   };
 
-  const pendingPath = writeFileAtomic(layout.reports, PENDING_FILE, renderPendingYaml(pending), info.workspace);
+  const pendingPath = writeFileInWorkspace(layout.reports, PENDING_FILE, renderPendingYaml(pending), { workspace: info.workspace });
   return { pending, pending_path: pendingPath, report_status: report.status ?? 'unknown', workspace_warnings: info.warnings };
 }
 
@@ -210,7 +232,8 @@ async function main(): Promise<number> {
     throw new Error(sanitizeText(err instanceof Error ? err.message : String(err)));
   }
   if (values.json === true) {
-    process.stdout.write(`${sanitizeText(JSON.stringify({ pending_path: result.pending_path, ...maskedPending(result.pending) }, null, 2))}\n`);
+    // D32: sanitize value by value, then serialize.
+    process.stdout.write(`${JSON.stringify(sanitizeDeep({ pending_path: result.pending_path, ...maskedPending(result.pending) }), null, 2)}\n`);
   } else {
     printWarnings(result.workspace_warnings.map(sanitizeText));
     process.stdout.write(`${renderReviewSummary(result)}\n`);

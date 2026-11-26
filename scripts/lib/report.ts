@@ -2,12 +2,12 @@
 // Masked only: samples go through maskEmail, and every string is passed through the address
 // sanitizer before it is written (D28), so a header or an error message cannot leak an address.
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ColumnMapping, MergeStats, ResolvedEncoding, RunReport, SourceMeta, SourceStageResult } from './types.ts';
 import { maskEmail } from './mask.ts';
 import { sanitizeText } from './sanitize.ts';
+import { writeFileInWorkspace } from './fsafe.ts';
 import { readRejectedRows, readStagedRows } from './merge.ts';
 import { REVIEW_THRESHOLD } from './read/synonyms.ts';
 import { decodeBytes } from './read/decode.ts';
@@ -255,47 +255,20 @@ export function renderMarkdown(r: FullRunReport): string {
 }
 
 /**
- * Write `<dir>/<name>` atomically: a new temp file in the same directory (`wx`, mode 0600) renamed over
- * the target, so a symlink at the target is replaced, never followed. With `workspace`, the directory's
- * realpath must lie inside the workspace's realpath (it must already exist), else nothing is written.
- * Returns the path written.
- */
-export function writeFileAtomic(dir: string, name: string, content: string, workspace?: string): string {
-  if (name !== path.basename(name) || name === '' || name === '.' || name === '..') throw new Error(`invalid file name: ${name}`);
-  let realDir: string;
-  if (workspace !== undefined) {
-    realDir = fs.realpathSync(dir);
-    const realWs = fs.realpathSync(workspace);
-    const rel = path.relative(realWs, realDir);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new Error(`refusing to write ${name}: ${dir} resolves to ${realDir}, which is outside the workspace ${realWs}`);
-    }
-  } else {
-    fs.mkdirSync(dir, { recursive: true });
-    realDir = fs.realpathSync(dir);
-  }
-  const tmp = path.join(realDir, `.${name}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  fs.writeFileSync(tmp, content, { flag: 'wx', mode: 0o600 });
-  try {
-    fs.renameSync(tmp, path.join(realDir, name));
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
-  return path.join(dir, name);
-}
-
-/**
  * Write `<run_id>.json` and `<run_id>.md`, plus `latest.json` / `latest.md` with the same content, each
- * atomically (writeFileAtomic). Pass `workspace` to refuse a reports directory that resolves outside it.
+ * through writeFileInWorkspace (D32: temp file + rename, a symlink at the target is replaced). Pass
+ * `workspace` to refuse a reports directory that resolves outside it; without it the directory itself
+ * is the boundary.
  */
 export function writeReport(report: FullRunReport, reportsDir: string, workspace?: string): { json: string; md: string } {
+  if (workspace === undefined) fs.mkdirSync(reportsDir, { recursive: true });
+  const write = (name: string, text: string) => writeFileInWorkspace(reportsDir, name, text, { workspace: workspace ?? reportsDir });
   const safe = sanitizeDeep(report);
   const jsonText = `${JSON.stringify(safe, null, 2)}\n`;
   const mdText = renderMarkdown(safe);
-  const json = writeFileAtomic(reportsDir, `${safe.run_id}.json`, jsonText, workspace);
-  const md = writeFileAtomic(reportsDir, `${safe.run_id}.md`, mdText, workspace);
-  writeFileAtomic(reportsDir, 'latest.json', jsonText, workspace);
-  writeFileAtomic(reportsDir, 'latest.md', mdText, workspace);
+  const json = write(`${safe.run_id}.json`, jsonText);
+  const md = write(`${safe.run_id}.md`, mdText);
+  write('latest.json', jsonText);
+  write('latest.md', mdText);
   return { json, md };
 }

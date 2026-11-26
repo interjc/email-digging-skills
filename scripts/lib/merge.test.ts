@@ -417,3 +417,23 @@ test('merge failure rolls back the whole transaction', async () => {
   assert.deepEqual(snapshot(w.db), before);
   w.db.close();
 });
+
+test('typo counter: a reject counts only when its address is among the original (pre-override) staged addresses', async () => {
+  const w = fixtureWorkspace();
+  const base = loadOverrides(w.layout.overrides);
+  const overrides: Overrides = {
+    ...base,
+    typo: [
+      ...base.typo,
+      { email: 'yuta.kobayashi@example.con', action: 'accept', suggested: 'yuta.kobayashi@example.com' },
+      // present only as the accepted correction above, never as an original value
+      { email: 'yuta.kobayashi@example.com', action: 'reject' },
+    ],
+  };
+  const { stats, warnings } = await run(w, { overrides });
+  assert.ok(get(w.db, 'SELECT 1 AS x FROM contacts WHERE email = ?', 'yuta.kobayashi@example.com'), 'the correction is a contact');
+  // hiroshi (accept) + saki (reject) + yuta (accept); the reject of the corrected address does not count
+  assert.equal(stats.overrides_applied.typo, 3);
+  assert.ok(warnings.some((m) => m.includes('y***@e***e.com (reject) matched no address')), warnings.join('\n'));
+  w.db.close();
+});

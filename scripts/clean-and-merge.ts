@@ -23,7 +23,7 @@ import { stageSource } from './lib/stage.ts';
 import { backupDb, backupStamp, migrate, openDb } from './lib/db.ts';
 import { finishRun, mergeStaged, setRunReportPath, startRun, uniqueRunId } from './lib/merge.ts';
 import { resolvePriority } from './lib/priority.ts';
-import { buildReport, writeReport } from './lib/report.ts';
+import { buildReport, sanitizeDeep, writeReport } from './lib/report.ts';
 import type { FullRunReport, RunStatus } from './lib/report.ts';
 import { withWorkspaceLock } from './lib/lock.ts';
 import { sanitizeText } from './lib/sanitize.ts';
@@ -60,6 +60,9 @@ function freeReportId(reportsDir: string, base: string): string {
   for (let n = 1; fs.existsSync(path.join(reportsDir, `${id}.json`)); n++) id = `${base}-${n}`;
   return id;
 }
+
+/** D32: recovery after a report publication failure. */
+export const RERUN_ADVICE = 'Fix the cause and run clean-and-merge again (merges are full and idempotent)';
 
 export const SOURCE_NEEDS_DRY_RUN = '--source is only allowed together with --dry-run: a merge always processes every source with a meta.md (D30)';
 
@@ -116,7 +119,8 @@ async function runLocked(info: WorkspaceInfo, root: string, opts: CleanAndMergeO
   const errors: string[] = [];
   for (const meta of metas) {
     try {
-      results.push(await stageSource(meta, { stagingDir: layout.staging, overrides }));
+      // Reader findings (e.g. xlsx columns beyond ZZ) go into the run warnings, the report and --json.
+      results.push(await stageSource(meta, { stagingDir: layout.staging, overrides, onWarning: (m) => onWarning(`${meta.source}/${m}`) }));
     } catch (err) {
       errors.push(`${meta.source}: ${errMessage(err)}`);
     }
@@ -183,7 +187,7 @@ async function runLocked(info: WorkspaceInfo, root: string, opts: CleanAndMergeO
       setRunReportPath(db, runId, paths.md);
       return result('ok', rep, paths, backup);
     } catch (err) {
-      throw new Error(`merge committed (run ${runId}); report could not be written: ${errMessage(err)}; run review-report after fixing`);
+      throw new Error(`merge committed (run ${runId}); the report could not be written: ${errMessage(err)}. ${RERUN_ADVICE}`);
     }
   } finally {
     db.close();
@@ -265,7 +269,8 @@ async function main(): Promise<number> {
       merge: result.report.merge, warnings: result.report.warnings, errors: result.report.errors,
       sources_without_meta: result.report.sources_without_meta,
     };
-    process.stdout.write(`${sanitizeText(JSON.stringify(out, null, 2))}\n`);
+    // D32: sanitize value by value, then serialize (sanitizing the JSON text could break its syntax).
+    process.stdout.write(`${JSON.stringify(sanitizeDeep(out), null, 2)}\n`);
   } else {
     printWarnings(result.workspace_warnings.map(sanitizeText));
     process.stdout.write(`${renderSummary(result)}\n`);

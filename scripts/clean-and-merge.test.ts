@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { cleanAndMerge, renderSummary, SOURCE_NEEDS_DRY_RUN } from './clean-and-merge.ts';
+import { cleanAndMerge, renderSummary, RERUN_ADVICE, SOURCE_NEEDS_DRY_RUN } from './clean-and-merge.ts';
+import { writeXlsx } from './lib/read/testutil.ts';
 import { openDb, migrate } from './lib/db.ts';
 import { layoutDirs, workspaceLayout } from './lib/paths.ts';
 import type { WorkspaceLayout } from './lib/paths.ts';
@@ -123,7 +124,8 @@ test('clean-and-merge: a report failure after commit → run ok, report_path nul
   const outside = breakReports(layout);
   await assert.rejects(
     cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T12:00:00Z') }),
-    /^Error: merge committed \(run 20261126T120000Z\); report could not be written: .*outside the workspace.*; run review-report after fixing$/,
+    (err: Error) => err.message.startsWith('merge committed (run 20261126T120000Z); the report could not be written: ') &&
+      err.message.includes('outside the workspace') && err.message.endsWith(`. ${RERUN_ADVICE}`),
   );
   assert.deepEqual(query(layout, 'SELECT id, status, report_path FROM runs'), [{ id: '20261126T120000Z', status: 'ok', report_path: null }]);
   assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM contacts')[0]?.n, expected.contacts_total);
@@ -213,4 +215,38 @@ test('clean-and-merge CLI: masked stdout, exit 0; --json; exit 2 for an uninitia
   const empty = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 't7-cm-empty-')), 'ws');
   const e = spawnSync('node', ['scripts/clean-and-merge.ts', '--workspace', empty], { cwd: repo, encoding: 'utf8' });
   assert.equal(e.status, 2);
+});
+
+test('clean-and-merge: reader warnings (xlsx with data in column AAA) reach the run warnings, the report and --json', async () => {
+  const { ws, layout } = setup();
+  const dir = path.join(layout.resources, 'wide-src');
+  fs.mkdirSync(dir);
+  // 703 columns: the last one is AAA, beyond the ZZ width scan (D29)
+  const header = Array.from({ length: 703 }, (_, i): string | null => (i === 0 ? 'email' : `c${i}`));
+  const data = Array.from({ length: 703 }, (_, i): string | null => (i === 0 ? 'wide@example.org' : i === 702 ? 'at-aaa' : null));
+  await writeXlsx(path.join(dir, 'wide.xlsx'), [header, data]);
+  fs.writeFileSync(path.join(dir, 'meta.md'), '---\nsource: wide-src\nkind: other\nfiles:\n  - name: wide.xlsx\n    encoding: auto\ncolumns:\n  email: email\n---\n');
+  const expectedWarning = 'wide-src/wide.xlsx: columns beyond ZZ are not read';
+
+  const j = spawnSync('node', ['scripts/clean-and-merge.ts', '--workspace', ws, '--json'], { cwd: repo, encoding: 'utf8' });
+  assert.equal(j.status, 0, j.stderr);
+  const out = JSON.parse(j.stdout) as { warnings: string[]; status: string };
+  assert.equal(out.status, 'ok');
+  assert.ok(out.warnings.includes(expectedWarning), out.warnings.join('\n'));
+  const latest = JSON.parse(fs.readFileSync(path.join(layout.reports, 'latest.json'), 'utf8')) as { warnings: string[] };
+  assert.ok(latest.warnings.includes(expectedWarning));
+  assert.ok(fs.readFileSync(path.join(layout.reports, 'latest.md'), 'utf8').includes(`- ${expectedWarning}`));
+});
+
+test('clean-and-merge --json: values are sanitized before serializing, so a source dir named "@pending" still gives valid JSON', () => {
+  const { ws, layout } = setup();
+  fs.mkdirSync(path.join(layout.resources, '@pending'));
+  for (const extra of [[], ['--dry-run']]) {
+    const r = spawnSync('node', ['scripts/clean-and-merge.ts', '--workspace', ws, '--json', ...extra], { cwd: repo, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as { sources_without_meta: string[] };
+    assert.deepEqual(out.sources_without_meta, ['***']);
+    assert.ok(!r.stdout.includes('@pending'));
+    assert.deepEqual(unmaskedAddresses(r.stdout), []);
+  }
 });

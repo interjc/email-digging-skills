@@ -527,23 +527,26 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
 
   // Typo decisions are applied during staging. Count the original addresses they actually changed:
   // accepted = staged rows carrying typo_accepted (the original is the normalized raw value),
-  // rejected = the suspect address is present and kept as it is.
+  // rejected = the address occurs among the original (pre-override) staged addresses and was kept.
   const typoDecisions = dedupeLast(
     opts.overrides.typo.map((t) => ({ ...t, email: normalizeOverrideEmail(t.email) })),
     (t) => t.email,
     (t) => warn(`typo-decisions.yaml: several entries for ${maskEmail(t.email)}; the last one is used`),
   );
   const acceptedOriginals = new Set<string>();
+  const originals = new Set<string>();
   for (const s of staged) {
     for (const r of s.rows) {
-      if (!r.flags.includes('typo_accepted')) continue;
-      const original = normalizeEmailCell(r.raw_email)[0]?.email;
-      if (original) acceptedOriginals.add(original);
+      const accepted = r.flags.includes('typo_accepted');
+      const original = accepted ? normalizeEmailCell(r.raw_email)[0]?.email : r.email;
+      if (!original) continue;
+      originals.add(original);
+      if (accepted) acceptedOriginals.add(original);
     }
   }
   let typoApplied = 0;
   for (const t of typoDecisions) {
-    const hit = t.action === 'accept' ? acceptedOriginals.has(t.email) : byEmail.has(t.email);
+    const hit = t.action === 'accept' ? acceptedOriginals.has(t.email) : originals.has(t.email) && byEmail.has(t.email);
     if (hit) typoApplied++;
     else warn(`typo-decisions.yaml: ${maskEmail(t.email)} (${t.action}) matched no address in the merged sources`);
   }

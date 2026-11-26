@@ -10,7 +10,7 @@ import { loadOverrides } from './overrides.ts';
 import { stageSource } from './stage.ts';
 import { layoutDirs, workspaceLayout } from './paths.ts';
 import { mergeStaged, startRun } from './merge.ts';
-import { autoEncodings, buildReport, renderMarkdown, SAMPLE_LIMIT, writeFileAtomic, writeReport } from './report.ts';
+import { autoEncodings, buildReport, renderMarkdown, SAMPLE_LIMIT, writeReport } from './report.ts';
 import { SJIS, writeFile } from './read/testutil.ts';
 
 const repo = path.resolve(import.meta.dirname, '..', '..');
@@ -148,5 +148,6 @@ test('report files stay inside the workspace: symlinked targets are replaced, an
   fs.symlinkSync(elsewhere, path.join(ws2, 'output', 'reports'));
   assert.throws(() => writeReport(structuredClone(report) as never, path.join(ws2, 'output', 'reports'), ws2), /outside the workspace/);
   assert.deepEqual(fs.readdirSync(elsewhere), []);
-  assert.throws(() => writeFileAtomic(reports, '../x', 'y', ws), /invalid file name/);
+  // a run id that is not a plain file name never escapes the directory
+  assert.throws(() => writeReport({ ...structuredClone(report), run_id: '../x' } as never, reports, ws), /invalid file name/);
 });

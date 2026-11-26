@@ -181,3 +181,43 @@ test('review-report CLI: masked stdout and --json; exit 2 without a report', asy
   assert.ok(out.typo_decisions.every((t) => t.email.includes('*')));
   assert.deepEqual(unmaskedAddresses(j.stdout), []);
 });
+
+test('review-report: when the newest ok run has no report, it refuses the older report (exit 2) with the re-run advice', async () => {
+  const { ws, layout, root } = setup();
+  await cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T10:00:00Z') });
+  // a later merge whose report could not be published: committed, run ok, report_path null
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 't7-rr-pub-'));
+  const saved = fs.mkdtempSync(path.join(os.tmpdir(), 't7-rr-saved-'));
+  fs.cpSync(layout.reports, saved, { recursive: true });
+  fs.rmSync(layout.reports, { recursive: true });
+  fs.symlinkSync(outside, layout.reports);
+  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T11:00:00Z') }), /merge committed/);
+  fs.rmSync(layout.reports);
+  fs.cpSync(saved, layout.reports, { recursive: true }); // only the older run's report is on disk
+
+  await assert.rejects(reviewReport({ workspace: ws, repoRoot: root }), (err: Error & { fix?: string | null }) =>
+    err.name === 'PreconditionError' && /latest merge \(run 20261126T110000Z\) was committed but its report could not be written/.test(err.message) &&
+    /run clean-and-merge again \(merges are full and idempotent\)/.test(err.fix ?? ''));
+  const cli = spawnSync('node', ['scripts/review-report.ts', '--workspace', ws], { cwd: repo, encoding: 'utf8' });
+  assert.equal(cli.status, 2);
+  assert.match(cli.stderr, /run clean-and-merge again \(merges are full and idempotent\)/);
+  assert.equal(cli.stdout, '');
+
+  // the advised recovery works: a new full merge publishes its report, review-report proceeds
+  await cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T12:00:00Z') });
+  assert.equal((await reviewReport({ workspace: ws, repoRoot: root })).pending.run_id, '20261126T120000Z');
+});
+
+test('review-report --json: values sanitized before serializing; a source dir named "@pending" gives valid JSON', async () => {
+  const { ws, layout, root } = setup();
+  await cleanAndMerge({ workspace: ws, repoRoot: root });
+  fs.mkdirSync(path.join(layout.resources, '@pending'));
+  const r = spawnSync('node', ['scripts/review-report.ts', '--workspace', ws, '--json'], { cwd: repo, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout) as PendingDecisions;
+  assert.deepEqual(out.sources_without_meta, ['***']);
+  assert.ok(!r.stdout.includes('@pending'));
+  assert.deepEqual(unmaskedAddresses(r.stdout), []);
+  // the local pending file keeps the exact name
+  assert.ok(fs.readFileSync(path.join(layout.reports, PENDING_FILE), 'utf8').includes('@pending'));
+});
