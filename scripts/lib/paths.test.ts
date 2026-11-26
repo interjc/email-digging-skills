@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  checkWorkspaceSafety, cloudSyncWarning, layoutDirs, repoRoot, requireWorkspace, resolveWorkspace, workspaceLayout,
+  assertPathSafe, checkWorkspaceSafety, cloudSyncWarning, layoutDirs, repoRoot, requireWorkspace, resolveWorkspace, workspaceLayout,
 } from './paths.ts';
 import { PreconditionError } from './errors.ts';
 
@@ -274,4 +274,137 @@ test('requireWorkspace: database/mail-list.sqlite must be a regular file, not a 
   fs.rmSync(workspaceLayout(ws).dbPath);
   fs.mkdirSync(workspaceLayout(ws).dbPath);
   assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /not initialized/);
+});
+
+// --- round 2 (review R2) ---------------------------------------------------------------------------
+
+test('guard 1a: a .git that git cannot read refuses instead of being treated as "not a git repo"', () => {
+  const root = makeRepo({ git: false });
+  fs.mkdirSync(path.join(root, '.git')); // looks like a repository, but git cannot use it
+  initLayout(path.join(root, 'workspace'));
+  const safety = checkWorkspaceSafety(path.join(root, 'workspace'), root);
+  assert.equal(safety.warnings.length, 0);
+  assert.match(safety.problems.join(' '), /cannot be verified/);
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), (err: unknown) => err instanceof PreconditionError && /cannot be verified/.test(err.message));
+});
+
+test('guard 1a: .git in an ancestor of the repo root counts; git missing from PATH refuses', () => {
+  const outer = makeRepo(); // a real git repo
+  const inner = path.join(outer, 'sub');
+  fs.mkdirSync(inner);
+  fs.writeFileSync(path.join(inner, 'package.json'), '{}\n');
+  // git works here (the outer repo contains the inner directory): not an error state
+  assert.equal(checkWorkspaceSafety(path.join(inner, 'ws'), inner).problems.length > 0, true, 'ws is not ignored in the outer repo');
+
+  const root = makeRepo();
+  initLayout(path.join(root, 'workspace'));
+  const savedPath = process.env.PATH;
+  process.env.PATH = '';
+  try {
+    const safety = checkWorkspaceSafety(path.join(root, 'workspace'), root);
+    assert.match(safety.problems.join(' '), /cannot be verified/);
+    assert.equal(safety.warnings.length, 0);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+});
+
+test('guard 1a: no .git anywhere up the tree is still just a warning', () => {
+  const root = makeRepo({ git: false });
+  initLayout(path.join(root, 'workspace'));
+  const info = requireWorkspace({ repoRoot: root, env: {} });
+  assert.match(info.warnings.join(' '), /not a git repository/);
+});
+
+test('guard 1b: .gitkeep staged with content is refused even when the working file is empty', () => {
+  const root = makeRepo();
+  const ws = path.join(root, 'workspace');
+  initLayout(ws);
+  write(path.join(ws, '.gitkeep'), 'customer data\n');
+  execFileSync('git', ['add', '-f', 'workspace/.gitkeep'], { cwd: root });
+  fs.writeFileSync(path.join(ws, '.gitkeep'), ''); // working copy emptied, index still holds the data
+  const safety = checkWorkspaceSafety(ws, root);
+  assert.deepEqual(safety.tracked, ['workspace/.gitkeep']);
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /tracked by git/);
+});
+
+test('guard 1b: .gitkeep with content in the working tree is refused; empty in both places is allowed', () => {
+  const root = makeRepo();
+  const ws = path.join(root, 'workspace');
+  initLayout(ws);
+  write(path.join(ws, '.gitkeep'), '');
+  execFileSync('git', ['add', '-f', 'workspace/.gitkeep'], { cwd: root });
+  assert.equal(checkWorkspaceSafety(ws, root).problems.length, 0);
+  fs.writeFileSync(path.join(ws, '.gitkeep'), 'now has data\n');
+  assert.throws(() => requireWorkspace({ repoRoot: root, env: {} }), /tracked by git/);
+});
+
+test('guard 1c: an external workspace whose database/ is a symlink into the checkout is refused', () => {
+  const root = makeRepo();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-ext-')));
+  initLayout(outside);
+  fs.mkdirSync(path.join(root, 'dbdir'));
+  fs.rmSync(path.join(outside, 'database'), { recursive: true });
+  fs.symlinkSync(path.join(root, 'dbdir'), path.join(outside, 'database'));
+  fs.mkdirSync(path.join(outside, 'database', 'backups'));
+  fs.writeFileSync(path.join(outside, 'database', 'mail-list.sqlite'), '');
+  assert.throws(
+    () => requireWorkspace({ repoRoot: root, workspace: outside, env: {} }),
+    (err: unknown) => err instanceof PreconditionError && /not git-ignored|tracked by git/.test(err.message),
+  );
+});
+
+test('guard 1c: an external workspace whose database file is a symlink to a tracked file in the checkout is refused', () => {
+  const root = makeRepo();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-ext-')));
+  initLayout(outside);
+  write(path.join(root, 'loose.sqlite'), '');
+  execFileSync('git', ['add', '-f', 'loose.sqlite'], { cwd: root });
+  fs.rmSync(workspaceLayout(outside).dbPath);
+  fs.symlinkSync(path.join(root, 'loose.sqlite'), workspaceLayout(outside).dbPath);
+  assert.throws(
+    () => requireWorkspace({ repoRoot: root, workspace: outside, env: {} }),
+    (err: unknown) => err instanceof PreconditionError && /tracked by git/.test(err.message),
+  );
+});
+
+test('assertPathSafe: outside the repo passes; ignored directories (existing or not) pass', () => {
+  const root = makeRepo();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-out-')));
+  assertPathSafe(path.join(outside, 'resources', 'shop'), { repoRoot: root });
+  fs.mkdirSync(path.join(root, 'workspace', 'resources', 'shop'), { recursive: true });
+  assertPathSafe(path.join(root, 'workspace', 'resources', 'shop'), { repoRoot: root });
+  assertPathSafe(path.join(root, 'workspace', 'resources', 'not-yet-created'), { repoRoot: root });
+});
+
+test('assertPathSafe: refuses a directory git does not ignore, new files included (meta.md would be committable)', () => {
+  const root = makeRepo();
+  fs.mkdirSync(path.join(root, 'sources', 'shop'), { recursive: true });
+  assert.throws(
+    () => assertPathSafe(path.join(root, 'sources', 'shop'), { repoRoot: root, what: 'The source directory' }),
+    (err: unknown) => err instanceof PreconditionError && /^The source directory/.test(err.message) && /not git-ignored/.test(err.message),
+  );
+  // Only *.csv and *.sqlite are ignored by the repo-wide safety nets: the directory itself is not ignored.
+  fs.writeFileSync(path.join(root, '.gitignore'), 'sources/shop/*.csv\n');
+  assert.throws(() => assertPathSafe(path.join(root, 'sources', 'shop'), { repoRoot: root }), /not git-ignored/);
+});
+
+test('assertPathSafe: refuses tracked and unignored existing files; follows symlinks into the checkout', () => {
+  const root = makeRepo();
+  write(path.join(root, 'workspace', 'resources', 'shop', 'a.csv'));
+  execFileSync('git', ['add', '-f', 'workspace/resources/shop/a.csv'], { cwd: root });
+  assert.throws(() => assertPathSafe(path.join(root, 'workspace', 'resources', 'shop'), { repoRoot: root }), /tracked by git/);
+
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'paths-out-')));
+  fs.mkdirSync(path.join(root, 'plain'));
+  fs.symlinkSync(path.join(root, 'plain'), path.join(outside, 'link'));
+  assert.throws(() => assertPathSafe(path.join(outside, 'link'), { repoRoot: root }), /not git-ignored/);
+});
+
+test('assertPathSafe: git unusable although .git exists -> refuses; no .git anywhere -> passes', () => {
+  const broken = makeRepo({ git: false });
+  fs.mkdirSync(path.join(broken, '.git'));
+  assert.throws(() => assertPathSafe(path.join(broken, 'workspace'), { repoRoot: broken }), /cannot be verified/);
+  const plain = makeRepo({ git: false });
+  assertPathSafe(path.join(plain, 'anything'), { repoRoot: plain });
 });

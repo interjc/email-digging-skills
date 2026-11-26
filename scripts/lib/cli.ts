@@ -20,12 +20,17 @@ export interface ParsedCli {
 
 /** `parseArgs` with the common flags (--workspace, --json) merged into `options`. */
 export function parseCliArgs(argv: string[], options: OptionSpec = {}): ParsedCli {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    options: { ...COMMON_OPTIONS, ...options },
-    allowPositionals: true,
-  });
-  return { values: values as ParsedCli['values'], positionals };
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      options: { ...COMMON_OPTIONS, ...options },
+      allowPositionals: true,
+    });
+    return { values: values as ParsedCli['values'], positionals };
+  } catch (err) {
+    // Argument errors quote what the user typed (an unknown option can hold anything): mask it.
+    throw new Error(sanitizeText(err instanceof Error ? err.message : String(err)));
+  }
 }
 
 /**
@@ -50,5 +55,5 @@ export async function runCli(main: () => Promise<number | void>): Promise<void> 
 
 /** Print warnings to stderr (stdout stays clean for --json). */
 export function printWarnings(warnings: string[]): void {
-  for (const w of warnings) process.stderr.write(`Warning: ${w}\n`);
+  for (const w of warnings) process.stderr.write(`Warning: ${sanitizeText(w)}\n`);
 }

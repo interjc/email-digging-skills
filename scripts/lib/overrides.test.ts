@@ -76,3 +76,23 @@ test('errors never echo file content: a malformed YAML line holding an address i
     /typo-decisions\.yaml is not valid YAML \(.* at line \d+, column \d+\)/,
   );
 });
+
+test('YAML warnings (unresolved tag) are not printed and stop the load with code and position only', () => {
+  const printed: string[] = [];
+  const onWarning = (w: Error) => printed.push(w.message);
+  process.on('warning', onWarning);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: unknown) => { printed.push(String(c)); return true; }) as typeof process.stderr.write;
+  let message = '';
+  try {
+    loadOverrides(tmp({ 'suppressions.yaml': '- email: !bogus leak@example.com\n  reason: manual\n' }));
+  } catch (err) {
+    message = (err as Error).message;
+  } finally {
+    process.stderr.write = origErr;
+    process.removeListener('warning', onWarning);
+  }
+  assert.match(message, /suppressions\.yaml has a YAML warning \(TAG_RESOLVE_FAILED at line 1, column \d+\)/);
+  assert.ok(!message.includes('leak'), message);
+  assert.ok(!printed.join('').includes('leak'), printed.join(''));
+});

@@ -3,10 +3,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import type { ConsentBasis, PipelineConfig } from './types.ts';
 import { repoRoot, resolveWorkspace } from './paths.ts';
-import { describeYamlError, sanitizeError, sanitizeText } from './sanitize.ts';
+import { parseYamlSafe, sanitizeError, sanitizeText } from './sanitize.ts';
 import type { ResolveOpts } from './paths.ts';
 
 export interface LoadConfigOpts extends ResolveOpts {
@@ -60,16 +59,13 @@ export function parseConfig(text: string): { config: Omit<PipelineConfig, 'works
 }
 
 function parseConfigUnsafe(text: string): { config: Omit<PipelineConfig, 'workspace'>; warnings: string[] } {
-  let doc: unknown;
-  try {
-    doc = parseYaml(text);
-  } catch (err) {
-    throw new Error(`config.yaml is not valid YAML (${describeYamlError(err)}).`);
-  }
+  const parsed = parseYamlSafe(text);
+  if (parsed.errors.length > 0) throw new Error(`config.yaml is not valid YAML (${parsed.errors.join('; ')}).`);
+  let doc = parsed.value;
   if (doc === null || doc === undefined) doc = {};
   if (!isRecord(doc)) throw new Error('config.yaml: the top level must be a mapping.');
 
-  const warnings: string[] = [];
+  const warnings: string[] = parsed.warnings.map((w) => `config.yaml: YAML warning (${w}).`);
   for (const [key, value] of Object.entries(doc)) {
     const known = KNOWN_KEYS[key];
     if (known === undefined) {

@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PreconditionError } from './errors.ts';
+import { sanitizeText } from './sanitize.ts';
 
 export interface LockInfo {
   pid: number;
@@ -39,18 +40,20 @@ function readLock(file: string): LockInfo | null {
 }
 
 function busyError(file: string, info: LockInfo | null): PreconditionError {
+  // The lock file is data on disk: whatever it says is printed only after masking address-like text.
+  const clean = (text: string) => sanitizeText(text);
   if (info === null) {
     return new PreconditionError(
-      `The workspace is locked (${file}) but the lock file is unreadable.`,
-      `if no pipeline command is running, delete ${file} and run again.`,
+      clean(`The workspace is locked (${file}) but the lock file is unreadable.`),
+      clean(`if no pipeline command is running, delete ${file} and run again.`),
     );
   }
   const who = `"${info.command}" (pid ${info.pid}, started ${info.started_at})`;
   return pidAlive(info.pid)
-    ? new PreconditionError(`The workspace is in use by ${who}.`, 'wait for it to finish, then run again.')
+    ? new PreconditionError(clean(`The workspace is in use by ${who}.`), 'wait for it to finish, then run again.')
     : new PreconditionError(
-        `The workspace lock is stale: ${who} is no longer running.`,
-        `check that the workspace is intact, then delete ${file} and run again.`,
+        clean(`The workspace lock is stale: ${who} is no longer running.`),
+        clean(`check that the workspace is intact, then delete ${file} and run again.`),
       );
 }
 
@@ -65,17 +68,15 @@ export async function withWorkspaceLock<T>(workspace: string, command: string, f
   const info: LockInfo = { pid: process.pid, command, started_at: new Date().toISOString() };
   const body = `${JSON.stringify(info)}\n`;
 
-  let fd: number;
+  // Create and fill the lock in one exclusive write, so no reader ever sees an empty lock file.
   try {
-    fd = fs.openSync(file, 'wx', 0o600);
+    fs.writeFileSync(file, body, { flag: 'wx', mode: 0o600 });
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw busyError(file, readLock(file));
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === 'EEXIST') throw busyError(file, readLock(file));
+    // The file exists because of us only when the failure came after the open (the write or close).
+    if (e.syscall !== 'open') fs.rmSync(file, { force: true });
     throw err;
-  }
-  try {
-    fs.writeSync(fd, body);
-  } finally {
-    fs.closeSync(fd);
   }
 
   const release = (): void => {

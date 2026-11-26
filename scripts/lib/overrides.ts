@@ -3,9 +3,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { parse as parseYaml } from 'yaml';
 import type { ConsentStatus, Overrides, SuppressionReason } from './types.ts';
-import { describeYamlError, sanitizeError } from './sanitize.ts';
+import { parseYamlSafe, sanitizeError } from './sanitize.ts';
 
 const SUPPRESSION_REASONS: readonly SuppressionReason[] = ['unsubscribed', 'bounced', 'complained', 'manual'];
 const CONSENT_STATUSES: readonly ConsentStatus[] = ['granted', 'denied', 'unknown'];
@@ -21,13 +20,13 @@ function readList(file: string): Entry[] {
     throw err;
   }
   const name = path.basename(file);
-  let doc: unknown;
-  try {
-    doc = parseYaml(text);
-  } catch (err) {
-    // The parser's own message quotes the offending source line (which may hold an address): report position only.
-    throw new Error(`${name} is not valid YAML (${describeYamlError(err)}).`);
-  }
+  // The parser's own messages quote source lines (which may hold addresses): report code and position only.
+  const parsed = parseYamlSafe(text);
+  if (parsed.errors.length > 0) throw new Error(`${name} is not valid YAML (${parsed.errors.join('; ')}).`);
+  // A warning (e.g. an unresolved tag) means a value would be read differently from what was written;
+  // these files are human decisions, so stop instead of guessing.
+  if (parsed.warnings.length > 0) throw new Error(`${name} has a YAML warning (${parsed.warnings.join('; ')}); fix it and run again.`);
+  const doc = parsed.value;
   if (doc === null || doc === undefined) return [];
   if (!Array.isArray(doc)) throw new Error(`${name}: expected a list of entries at the top level.`);
   return doc.map((entry, i) => {

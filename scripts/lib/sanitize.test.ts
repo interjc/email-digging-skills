@@ -52,3 +52,68 @@ test('describeYamlError reports code and position, never the source text', () =>
   assert.ok(!msg.includes('leak'));
   assert.equal(describeYamlError(new Error('x')), 'parse error');
 });
+
+// --- round 2 (review R2) ---------------------------------------------------------------------------
+
+import { parseCliArgs, printWarnings } from './cli.ts';
+import { parseYamlSafe } from './sanitize.ts';
+
+test('sanitizeText finds compatibility forms of @ (small-form U+FE6B, full-width) and masks the original span', () => {
+  for (const at of ['﹫', '＠']) {
+    const out = sanitizeText(`x leak${at}example.com y`);
+    assert.ok(!out.includes('leak'), out);
+    assert.equal(out, 'x l***@e***e.com y');
+  }
+  // text outside the matches is left exactly as it was (no NFKC applied to it)
+  assert.equal(sanitizeText('Ａ＝１ taro﹫example.org ㈱'), 'Ａ＝１ t***@e***e.org ㈱');
+  // full-width letters in the address itself
+  assert.ok(!sanitizeText('ｌｅａｋ＠ｅｘａｍｐｌｅ．ｃｏｍ').includes('ｌｅａｋ'));
+});
+
+test('sanitizeText: bare compatibility @ fragments are blanked', () => {
+  assert.equal(sanitizeText('secret﹫'), '***');
+  assert.equal(sanitizeText('x ＠host'), 'x ***');
+});
+
+test('parseYamlSafe: errors and warnings are code + position only, and nothing is printed', () => {
+  const printed: string[] = [];
+  const onWarning = (w: Error) => printed.push(w.message);
+  process.on('warning', onWarning);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: unknown) => { printed.push(String(c)); return true; }) as typeof process.stderr.write;
+  let res;
+  try {
+    res = parseYamlSafe('- email: !bogus leak@example.com\n');
+  } finally {
+    process.stderr.write = origErr;
+    process.removeListener('warning', onWarning);
+  }
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.warnings.length, 1);
+  assert.match(res.warnings[0] as string, /^TAG_RESOLVE_FAILED at line 1, column \d+$/);
+  assert.ok(!printed.join('').includes('leak'), printed.join(''));
+
+  const bad = parseYamlSafe('a: [leak@example.com\n');
+  assert.ok(bad.errors.length > 0 && bad.errors.every((e) => !e.includes('leak')));
+  assert.equal(bad.value, null);
+});
+
+test('parseCliArgs: an unknown option holding an address-like value is masked in the error', () => {
+  for (const argv of [['--leak@example.com'], ['--x=leak@example.com'], ['--workspace']]) {
+    assert.throws(() => parseCliArgs(argv), (err: unknown) => err instanceof Error && !err.message.includes('leak@') && !err.message.includes('leak﹫'));
+  }
+  assert.throws(() => parseCliArgs(['--leak﹫example.com']), (err: unknown) => err instanceof Error && !err.message.includes('leak'));
+  assert.deepEqual(parseCliArgs(['--json', 'name']).positionals, ['name']);
+});
+
+test('printWarnings masks addresses', () => {
+  const chunks: string[] = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: unknown) => { chunks.push(String(c)); return true; }) as typeof process.stderr.write;
+  try {
+    printWarnings(['odd file leak@example.com']);
+  } finally {
+    process.stderr.write = orig;
+  }
+  assert.equal(chunks.join(''), 'Warning: odd file l***@e***e.com\n');
+});

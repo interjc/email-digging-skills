@@ -5,10 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { parse as parseYaml } from 'yaml';
 import { loadEnv } from './env.ts';
 import { PreconditionError } from './errors.ts';
-import { sanitizeText } from './sanitize.ts';
+import { parseYamlSafe, sanitizeText } from './sanitize.ts';
 
 export interface WorkspaceLayout {
   workspace: string;
@@ -57,14 +56,10 @@ function configWorkspace(root: string): string | null {
   } catch {
     return null;
   }
-  try {
-    const doc = parseYaml(text) as unknown;
-    if (doc && typeof doc === 'object' && 'workspace' in doc) {
-      const v = (doc as { workspace: unknown }).workspace;
-      return typeof v === 'string' ? nonEmpty(v) : null;
-    }
-  } catch {
-    // ignored on purpose
+  const { value: doc, errors } = parseYamlSafe(text);
+  if (errors.length === 0 && doc && typeof doc === 'object' && 'workspace' in doc) {
+    const v = (doc as { workspace: unknown }).workspace;
+    return typeof v === 'string' ? nonEmpty(v) : null;
   }
   return null;
 }
@@ -162,6 +157,26 @@ function git(root: string, args: string[], input?: string): { status: number; st
   return { status: typeof r.status === 'number' ? r.status : 127, stdout: r.stdout ?? '' };
 }
 
+/**
+ * Is `realRoot` inside a git work tree?
+ *  - 'yes': git confirms it.
+ *  - 'none': no `.git` anywhere up the tree: a genuine non-git checkout (warn only).
+ *  - 'error': a `.git` exists up the tree but git cannot confirm (git missing, broken repository, exit 128):
+ *    the workspace cannot be verified, so callers must refuse.
+ */
+function gitState(realRoot: string): 'yes' | 'none' | 'error' {
+  if (git(realRoot, ['rev-parse', '--is-inside-work-tree']).stdout.trim() === 'true') return 'yes';
+  for (let dir = realRoot; ; ) {
+    if (fs.existsSync(path.join(dir, '.git'))) return 'error';
+    const parent = path.dirname(dir);
+    if (parent === dir) return 'none';
+    dir = parent;
+  }
+}
+
+const GIT_UNVERIFIABLE =
+  'git could not be run or the repository is unreadable (rev-parse failed although a .git exists), so git-ignore protection cannot be verified';
+
 export interface WorkspaceSafety {
   /** The workspace, or any of its layout directories / database file, resolves inside the repository. */
   insideRepo: boolean;
@@ -222,8 +237,13 @@ export function checkWorkspaceSafety(workspace: string, root: string = repoRoot(
   result.insideRepo = dirs.size > 0 || dbFile !== null;
   if (!result.insideRepo) return result;
 
-  result.gitRepo = git(realRoot, ['rev-parse', '--is-inside-work-tree']).stdout.trim() === 'true';
-  if (!result.gitRepo) {
+  const state = gitState(realRoot);
+  result.gitRepo = state === 'yes';
+  if (state === 'error') {
+    result.problems.push(`The workspace (${workspace}) is inside the repository but ${GIT_UNVERIFIABLE}`);
+    return result;
+  }
+  if (state === 'none') {
     result.warnings.push('The repository is not a git repository, so git-ignore protection cannot be verified.');
     return result;
   }
@@ -237,9 +257,12 @@ export function checkWorkspaceSafety(workspace: string, root: string = repoRoot(
   if (ls.status !== 0) {
     result.problems.push('git could not list the tracked files (git ls-files failed), so the workspace cannot be verified');
   }
-  // The empty `<workspace>/.gitkeep` placeholder is the one file the repository may track.
+  // The empty `<workspace>/.gitkeep` placeholder is the one file the repository may track: the working
+  // file must be empty and, when it is in the index, the staged blob must be the empty blob too.
   const placeholderAbs = path.join(realWs, '.gitkeep');
-  const placeholder = wsInside && isEmptyFile(placeholderAbs) ? path.relative(realRoot, placeholderAbs) : null;
+  const placeholder = wsInside && isEmptyFile(placeholderAbs) && indexBlobIsEmptyOrAbsent(realRoot, rel(placeholderAbs))
+    ? rel(placeholderAbs)
+    : null;
   result.tracked = nulList(ls.stdout).filter((f) => f !== placeholder);
 
   // 2. existing files that are neither tracked nor ignored
@@ -272,6 +295,7 @@ export function checkWorkspaceSafety(workspace: string, root: string = repoRoot(
     if (ci.status !== 0) result.notIgnored.push(show(dbFile));
   }
 
+  result.notIgnored = [...new Set(result.notIgnored)];
   const parts: string[] = [];
   if (result.tracked.length > 0) {
     parts.push(`${result.tracked.length} file(s) are tracked by git (${sampleNames(result.tracked)})`);
@@ -282,6 +306,19 @@ export function checkWorkspaceSafety(workspace: string, root: string = repoRoot(
     result.problems.unshift(`The workspace (${workspace}) is inside the repository and real data could be committed: ${parts.join('; ')}`);
   }
   return result;
+}
+
+/** True when the path is not in the index, or its staged entry is a regular file with the empty blob. */
+function indexBlobIsEmptyOrAbsent(realRoot: string, relPath: string): boolean {
+  const staged = git(realRoot, ['ls-files', '-s', '-z', '--', relPath]);
+  if (staged.status !== 0) return false;
+  const entries = nulList(staged.stdout);
+  if (entries.length === 0) return true;
+  const emptyBlob = git(realRoot, ['hash-object', '--stdin'], '').stdout.trim();
+  return emptyBlob !== '' && entries.every((e) => {
+    const m = /^(\d+) ([0-9a-f]+) (\d)\t/.exec(e);
+    return m !== null && m[1] === '100644' && m[2] === emptyBlob;
+  });
 }
 
 function isEmptyFile(p: string): boolean {
@@ -301,6 +338,61 @@ function sampleNames(names: string[]): string {
 /** Fix text shared by every refusal of an unsafe workspace. */
 export const SAFETY_FIX =
   'git-ignore the workspace in .gitignore (`workspace/*`), untrack anything git tracks there, or choose a workspace outside the repository with --workspace; then run `pnpm init-workspace`.';
+
+export interface AssertPathSafeOpts {
+  repoRoot?: string;
+  /** Names the thing in the error message, e.g. "The source directory". */
+  what?: string;
+  /** 'file': only the path itself is checked. Default 'auto': anything that is not an existing file is
+   *  treated as a directory, and new files of the usual kinds inside it must be ignored too. */
+  kind?: 'auto' | 'file';
+}
+
+/**
+ * Refuse a path (resolved with realpath, so symlinks count) that lies inside the repository unless git
+ * ignores it and tracks nothing under it. Paths outside the repository pass. Throws PreconditionError.
+ * Callers use it before writing under a directory they were handed (e.g. a source directory before meta.md).
+ */
+export function assertPathSafe(target: string, opts: AssertPathSafeOpts = {}): void {
+  const root = realpathLoose(opts.repoRoot ?? repoRoot());
+  const real = realpathLoose(target);
+  if (!isInside(real, root)) return;
+
+  const what = opts.what ?? 'The path';
+  const refuse = (detail: string): never => {
+    throw new PreconditionError(`${what} (${target}) is inside the repository and real data could be committed: ${detail}`, SAFETY_FIX);
+  };
+
+  const state = gitState(root);
+  if (state === 'none') return;
+  if (state === 'error') refuse(GIT_UNVERIFIABLE);
+
+  const rel = path.relative(root, real) || '.';
+  const isFileTarget = opts.kind === 'file' || isFile(real);
+
+  const ls = git(root, ['ls-files', '-z', '--', rel]);
+  if (ls.status !== 0) refuse('git ls-files failed, so the path cannot be verified');
+  const tracked = nulList(ls.stdout);
+  if (tracked.length > 0) refuse(`${tracked.length} file(s) are tracked by git (${sampleNames(tracked)})`);
+
+  const st = git(root, ['status', '--porcelain', '-z', '--untracked-files=all', '--', rel]);
+  if (st.status !== 0) refuse('git status failed, so the path cannot be verified');
+  const unignored = nulList(st.stdout).map((e) => e.slice(3));
+  if (unignored.length > 0) refuse(`not git-ignored: ${sampleNames(unignored)}`);
+
+  const paths = [rel];
+  if (!isFileTarget) {
+    const stem = `__probe_${crypto.randomBytes(4).toString('hex')}__`;
+    for (const ext of PROBE_SUFFIXES) paths.push(path.join(rel, `${stem}.${ext}`));
+  }
+  const ci = git(root, ['check-ignore', '-z', '--stdin'], paths.map((p) => `${p}\0`).join(''));
+  if (ci.status > 1) refuse('git check-ignore failed, so the path cannot be verified');
+  const ignored = new Set(nulList(ci.stdout));
+  const missing = paths.filter((p) => !ignored.has(p));
+  if (missing.length > 0) {
+    refuse(`not git-ignored: ${missing.map((p) => (p === rel ? rel : `<new .${path.extname(p).slice(1)} file>`)).map(sanitizeText).join(', ')}`);
+  }
+}
 
 export interface WorkspaceInfo {
   workspace: string;
@@ -325,6 +417,10 @@ export function requireWorkspace(opts: ResolveOpts = {}): WorkspaceInfo {
       SAFETY_FIX,
     );
   }
+
+  // The database file's real location must be safe too (an external workspace whose database/ or
+  // mail-list.sqlite is a symlink into the checkout).
+  assertPathSafe(layout.dbPath, { repoRoot: root, what: 'The database file', kind: 'file' });
 
   const missing = layoutDirs(layout).filter((d) => !isDir(d));
   if (missing.length > 0 || !isFile(layout.dbPath)) {

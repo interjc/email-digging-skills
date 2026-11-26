@@ -96,3 +96,38 @@ test('config errors and warnings never echo address-like values (D28)', () => {
   assert.equal(warnings.length, 1);
   assert.ok(!String(warnings[0]).includes('leak@'), String(warnings[0]));
 });
+
+test('config.yaml YAML warnings are reported as code + position, never the source line, and nothing is printed', () => {
+  const printed: string[] = [];
+  const onWarning = (w: Error) => printed.push(w.message);
+  process.on('warning', onWarning);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: unknown) => { printed.push(String(c)); return true; }) as typeof process.stderr.write;
+  let warnings: string[] = [];
+  try {
+    warnings = parseConfig('sources:\n  priority: [!bogus leak@example.com]\n').warnings;
+  } finally {
+    process.stderr.write = origErr;
+    process.removeListener('warning', onWarning);
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] as string, /^config\.yaml: YAML warning \(TAG_RESOLVE_FAILED at line 2, column \d+\)\.$/);
+  assert.ok(!printed.join('').includes('leak'), printed.join(''));
+});
+
+test('the workspace lookup in config.yaml does not print YAML warnings either', () => {
+  const root = tmpRepo();
+  fs.writeFileSync(path.join(root, 'config.yaml'), 'workspace: ./w\nnote: !bogus leak@example.com\n');
+  const printed: string[] = [];
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: unknown) => { printed.push(String(c)); return true; }) as typeof process.stderr.write;
+  const onWarning = (w: Error) => printed.push(w.message);
+  process.on('warning', onWarning);
+  try {
+    assert.equal(loadConfig({ repoRoot: root, env: {}, onWarning: () => {} }).workspace, path.join(root, 'w'));
+  } finally {
+    process.stderr.write = origErr;
+    process.removeListener('warning', onWarning);
+  }
+  assert.ok(!printed.join('').includes('leak'), printed.join(''));
+});

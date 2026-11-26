@@ -95,3 +95,56 @@ test('real parallel processes: only one holds the lock', () => {
     assert.ok(!fs.existsSync(lockPath(ws)));
   });
 });
+
+// --- round 2 (review R2) ---------------------------------------------------------------------------
+
+test('busy and stale errors mask address-like text read from the lock file', async () => {
+  const ws = tmp();
+  fs.writeFileSync(lockPath(ws), JSON.stringify({ pid: process.pid, command: 'run for leak@example.com', started_at: '2026-01-01T00:00:00.000Z' }));
+  await assert.rejects(() => withWorkspaceLock(ws, 'x', () => undefined), (err: unknown) => {
+    const e = err as PreconditionError;
+    return /in use by/.test(e.message) && !e.message.includes('leak@') && !(e.fix ?? '').includes('leak@');
+  });
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid as number;
+  fs.writeFileSync(lockPath(ws), JSON.stringify({ pid: dead, command: 'leak﹫example.com', started_at: '2026-01-01T00:00:00.000Z' }));
+  await assert.rejects(() => withWorkspaceLock(ws, 'x', () => undefined), (err: unknown) => /stale/.test((err as Error).message) && !(err as Error).message.includes('leak'));
+});
+
+test('the lock body is written by the same exclusive create; a failed write after creation removes the file', async () => {
+  const ws = tmp();
+  const realWrite = fs.writeFileSync;
+  const calls: Array<{ flag: unknown }> = [];
+  // Simulate a disk-full failure after the file was created.
+  (fs as { writeFileSync: unknown }).writeFileSync = (file: fs.PathOrFileDescriptor, data: unknown, options?: { flag?: string; mode?: number }) => {
+    if (String(file) === lockPath(ws)) {
+      calls.push({ flag: options?.flag });
+      realWrite(file, '', options as fs.WriteFileOptions); // the exclusive create succeeded, the content did not land
+      throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC', syscall: 'write' });
+    }
+    return realWrite(file, data as string, options as fs.WriteFileOptions);
+  };
+  try {
+    await assert.rejects(() => withWorkspaceLock(ws, 'x', () => undefined), /ENOSPC/);
+  } finally {
+    (fs as { writeFileSync: unknown }).writeFileSync = realWrite;
+  }
+  assert.deepEqual(calls, [{ flag: 'wx' }], 'one exclusive create, no separate open/write');
+  assert.ok(!fs.existsSync(lockPath(ws)), 'no empty lock left behind');
+  await withWorkspaceLock(ws, 'x', () => undefined); // not blocked by a leftover
+});
+
+test('a failure to open the lock (not a failure after creation) never deletes an existing file', async () => {
+  const ws = tmp();
+  fs.writeFileSync(lockPath(ws), 'someone else');
+  const realWrite = fs.writeFileSync;
+  (fs as { writeFileSync: unknown }).writeFileSync = (file: fs.PathOrFileDescriptor, data: unknown, options?: unknown) => {
+    if (String(file) === lockPath(ws)) throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES', syscall: 'open' });
+    return realWrite(file, data as string, options as fs.WriteFileOptions);
+  };
+  try {
+    await assert.rejects(() => withWorkspaceLock(ws, 'x', () => undefined), /EACCES/);
+  } finally {
+    (fs as { writeFileSync: unknown }).writeFileSync = realWrite;
+  }
+  assert.equal(fs.readFileSync(lockPath(ws), 'utf8'), 'someone else');
+});
