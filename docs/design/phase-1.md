@@ -48,6 +48,8 @@ export-to-provider (dry-run).
 
 | D29 | Accepted limitations after review R2 (documented, not fixed in phase 1): xlsx data beyond column ZZ is not read (the width scan stops there; the probe warns when column ZZ is non-empty); backup retention assumes a monotonic clock; two `init-workspace` runs at the same time against one repository can race on the repo-level `.env`/`config.yaml` (init is a one-time human step); a lock file left behind by a crash or a failed lock write is reported as stale and removed by the human | director, R2 |
 
+| D30 | Every real merge processes **all** sources with meta.md (a full recompute of derived tables; contacts and suppressions are still never deleted). `clean-and-merge --source <name>` is allowed only together with `--dry-run` (stage + report preview). Reason: partial merges left withdrawn consent overrides and stale names in place (review R3) | director, R3 |
+
 Open (not needed for phase 1, asked later): verification service; which real sources count as opt-in (user config).
 
 ## Module map and leases
