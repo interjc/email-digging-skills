@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Pre-commit and CI safety checks**: `scripts/check-staged-emails.ts` (scanning UTF-8, UTF-16, CP932, GB18030, `.xlsx` XML, and binary ASCII runs for non-`example.*` addresses), `.githooks/pre-commit`, `.gitleaks.toml`, deterministic synthetic fixtures (`scripts/make-fixtures.ts`), and GitHub Actions CI.
 - **Vendor-neutral skills and specifications**: seven skills under `skills/` (symlinked from `.claude/skills` and `.agents/skills`), specifications under `docs/`, and bilingual documentation (`README.md`, `README.zh-CN.md`).
 
+- **`check-domains --auto-accept`**: standing rule that writes accept decisions for typo suggestions to curated popular providers into `overrides/typo-decisions.yaml` (other suggestions stay for human review).
+
 ### Known limitations
 
 - **XLSX column width limit**: Excel spreadsheets with data beyond column `ZZ` are not read past `ZZ` (the probe and staging warn when column `ZZ` is non-empty).

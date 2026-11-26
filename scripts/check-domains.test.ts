@@ -226,7 +226,7 @@ test('check-domains with --dns splits obvious vs ambiguous, queries bare domains
     obvious: Array<{ email: string; suggested: string; suggested_provider: string | null }>;
     ambiguous: Array<{ email: string; suggested: string | null; suggested_provider: string | null }>;
   };
-  assert.deepEqual(jsonObj.counts, { total: 4, obvious: 1, ambiguous: 3 });
+  assert.deepEqual(jsonObj.counts, { total: 4, auto_accepted: 0, obvious: 1, ambiguous: 3 });
   assert.equal(jsonObj.obvious[0]?.email, 't***@g***l.com');
   assert.equal(jsonObj.obvious[0]?.suggested_provider, 'gmail.com');
   assert.deepEqual(unmaskedAddresses(JSON.stringify(jsonObj)), []);
@@ -245,7 +245,7 @@ test('check-domains exits 0 and prints "no undecided typo suspects" when nothing
   const cliJson = spawnSync('node', ['scripts/check-domains.ts', '--workspace', ws, '--json'], { cwd: repo, encoding: 'utf8' });
   assert.equal(cliJson.status, 0, cliJson.stderr);
   const parsed = JSON.parse(cliJson.stdout) as { counts: { total: number; obvious: number; ambiguous: number } };
-  assert.deepEqual(parsed.counts, { total: 0, obvious: 0, ambiguous: 0 });
+  assert.deepEqual(parsed.counts, { total: 0, auto_accepted: 0, obvious: 0, ambiguous: 0 });
 });
 
 test('check-domains enforces workspace guard, lock, symlink safety, and D32 JSON sanitization', async () => {
@@ -281,4 +281,41 @@ test('check-domains enforces workspace guard, lock, symlink safety, and D32 JSON
     checkDomains({ workspace: ws, repoRoot: root, dns: false }),
     (err: Error) => err.name === 'PreconditionError' && /in use/.test(err.message),
   );
+});
+
+test('D35: --auto-accept writes accept decisions for popular-provider suggestions only, keeps existing lines, and is idempotent', async () => {
+  const { ws, layout, root } = setupEmptyWorkspace();
+  seedContacts(layout.dbPath, [
+    { email: 'aa@gmial.com', domain: 'gmial.com', status: 'typo_suspect', suggested: 'aa@gmail.com' }, // email-scan:allow
+    { email: 'bb@outlook.con', domain: 'outlook.con', status: 'typo_suspect', suggested: 'bb@outlook.com' }, // email-scan:allow
+    { email: 'cc@example.con', domain: 'example.con', status: 'typo_suspect', suggested: 'cc@example.com' },
+  ]);
+  const existing = '# my notes\n- email: zz@example.org\n  action: reject\n';
+  fs.writeFileSync(path.join(layout.overrides, 'typo-decisions.yaml'), existing);
+
+  const r = await checkDomains({ workspace: ws, repoRoot: root, autoAccept: true });
+  assert.deepEqual(r.report.auto_accepted.map((e) => e.suggested).sort(), ['aa@gmail.com', 'bb@outlook.com']); // email-scan:allow
+  assert.deepEqual(r.report.ambiguous.map((e) => e.email), ['cc@example.con']);
+  const text = fs.readFileSync(path.join(layout.overrides, 'typo-decisions.yaml'), 'utf8');
+  assert.ok(text.startsWith(existing), 'existing lines are kept');
+  const loaded = loadOverrides(layout.overrides).typo;
+  assert.equal(loaded.length, 3);
+  assert.ok(loaded.filter((t) => t.action === 'accept').every((t) => /auto-accept \(D35\)/.test(t.note ?? '')));
+  assert.equal(unmaskedAddresses(renderDomainCheckSummary(r)).length, 0);
+
+  // Second run: the decided addresses are skipped, nothing more is appended.
+  const r2 = await checkDomains({ workspace: ws, repoRoot: root, autoAccept: true });
+  assert.equal(r2.report.auto_accepted.length, 0);
+  assert.equal(fs.readFileSync(path.join(layout.overrides, 'typo-decisions.yaml'), 'utf8'), text);
+
+  // Without --auto-accept nothing is written to overrides.
+  const r3 = await checkDomains({ workspace: ws, repoRoot: root });
+  assert.equal(r3.report.auto_accept_path, null);
+
+  // A flow-style list is refused rather than corrupted.
+  const { ws: ws2, layout: l2, root: root2 } = setupEmptyWorkspace();
+  seedContacts(l2.dbPath, [{ email: 'aa@gmial.com', domain: 'gmial.com', status: 'typo_suspect', suggested: 'aa@gmail.com' }]); // email-scan:allow
+  fs.writeFileSync(path.join(l2.overrides, 'typo-decisions.yaml'), '[]\n');
+  await assert.rejects(() => checkDomains({ workspace: ws2, repoRoot: root2, autoAccept: true }), /block-style YAML list/);
+  assert.equal(fs.readFileSync(path.join(l2.overrides, 'typo-decisions.yaml'), 'utf8'), '[]\n');
 });

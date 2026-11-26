@@ -12,7 +12,7 @@ Reads undecided `typo_suspect` contacts (`orphaned_at IS NULL`, not yet in `work
 - **Obvious**: with `--dns`, the typed domain refuses mail (`ENOTFOUND`, null MX per RFC 7505, or non-resolving MX exchanges) **and** the suggested domain accepts mail (MX resolving to A/AAAA, or A/AAAA fallback per RFC 5321 §5.1). Pre-filled with `action: accept` and the DNS evidence in `note`.
 - **Ambiguous**: everything else — including when `--dns` is omitted, when the typed domain accepts mail, when the suggested domain refuses mail, or when the final verdict for either domain is `unknown` (for example every lookup timed out or failed with `ESERVFAIL` / `ECONNREFUSED`; one temporary error is not enough when another MX host of the same domain resolves). Written with `action: null` and the reason.
 
-Prints a masked summary to `stdout` (obvious first, then ambiguous) and writes full, copy-ready entries to `output/reports/domain-check.yaml`. Never modifies `workspace/overrides/` or the database.
+Prints a masked summary to `stdout` (obvious first, then ambiguous) and writes full, copy-ready entries to `output/reports/domain-check.yaml`. Never modifies the database, and writes to `workspace/overrides/` only with `--auto-accept` (D35).
 
 ## Preconditions
 
@@ -30,11 +30,18 @@ node scripts/check-domains.ts [--workspace <path>]
 # Opt-in DNS check via the host resolver (sorts suspects into obvious and ambiguous)
 node scripts/check-domains.ts [--workspace <path>] --dns
 
+# Standing rule approved by the human (D35): write accept decisions for every suggestion to a curated
+# popular provider (scripts/lib/rules/providers.json) into overrides/typo-decisions.yaml, then re-merge
+node scripts/check-domains.ts [--workspace <path>] --dns --auto-accept
+node scripts/clean-and-merge.ts [--workspace <path>]
+
 # Masked JSON output (counts + masked entries)
 node scripts/check-domains.ts [--workspace <path>] [--dns] --json
 ```
 
 Exit codes: `0` ok (including when there are no undecided typo suspects); `1` unexpected runtime error; `2` missing or unsafe workspace, or `.lock` held.
+
+`--auto-accept` is the only path that writes to `overrides/`: it appends entries (with a `note` naming D35) and never edits existing lines; a human can still change any entry to `reject`. Suggestions to domains that are not on the provider list stay in the obvious / ambiguous lists for the human.
 
 ## Reading the output
 
@@ -53,6 +60,6 @@ Exit codes: `0` ok (including when there are no undecided typo suspects); `1` un
 ## Never do
 
 - **Never read `output/reports/domain-check.yaml` into agent context** — it contains full, unmasked customer email addresses for local human editing only. Read only the masked `stdout` / `--json` output.
-- Never write to `workspace/overrides/typo-decisions.yaml` or auto-apply typo suggestions on behalf of the human.
+- Never write to `workspace/overrides/typo-decisions.yaml` by hand on behalf of the human, and never auto-apply suggestions to domains outside the curated provider list; `--auto-accept` (D35) is the only automatic path.
 - Never run `--dns` against a real workspace without confirming the human wants host DNS lookups for the undecided domains.
 - Never read raw `workspace/resources/` files, print full addresses, edit `resources/`, write to external providers without confirmation, or delete database content.

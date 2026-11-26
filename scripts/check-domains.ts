@@ -1,4 +1,4 @@
-// check-domains [--workspace <p>] [--dns] [--json]
+// check-domains [--workspace <p>] [--dns] [--auto-accept] [--json]
 // Sort undecided typo suspects into obvious and ambiguous so a human can confirm fixes faster (D34).
 // Without --dns: no network; every suspect is ambiguous.
 // With --dns: classifies typed and suggested domains via the host's DNS resolver (RFC 5321 §5.1 / RFC 7505).
@@ -6,7 +6,8 @@
 
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { stringify as stringifyYaml } from 'yaml';
+import path from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { EXIT } from './lib/types.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
 import { PreconditionError } from './lib/errors.ts';
@@ -44,12 +45,25 @@ export interface AmbiguousTypoEntry {
   sources: string[];
 }
 
+/** D35: a suggestion to a curated popular provider, written to overrides by --auto-accept. */
+export interface AutoAcceptedEntry {
+  email: string;
+  suggested: string;
+  action: 'accept';
+  note: string;
+  sources: string[];
+}
+
 export interface DomainCheckReport {
   generated_at: string;
   dns_checked: boolean;
   total: number;
   obvious: ObviousTypoEntry[];
   ambiguous: AmbiguousTypoEntry[];
+  /** Empty unless --auto-accept. */
+  auto_accepted: AutoAcceptedEntry[];
+  /** overrides/typo-decisions.yaml when --auto-accept wrote entries, else null. */
+  auto_accept_path: string | null;
 }
 
 export interface DomainCheckResult {
@@ -62,6 +76,8 @@ export interface CheckDomainsOpts {
   workspace?: string | null;
   repoRoot?: string;
   dns?: boolean;
+  /** D35: write accept decisions for suggestions to a popular provider into overrides/typo-decisions.yaml. */
+  autoAccept?: boolean;
   /** Injected DNS resolver (used in tests so they never touch the network). */
   resolver?: DnsResolver;
   concurrency?: number;
@@ -201,12 +217,36 @@ async function checkDomainsLocked(info: WorkspaceInfo, opts: CheckDomainsOpts): 
     }
   }
 
+  // D35 (user 2026-11-27): suggestions to a curated popular provider need no further human judgement.
+  const autoAccepted: AutoAcceptedEntry[] = [];
+  let autoAcceptPath: string | null = null;
+  if (opts.autoAccept === true) {
+    const isAuto = (suggested: string | null): suggested is string => {
+      const d = domainOf(suggested);
+      return d !== null && isProviderDomain(d);
+    };
+    const take = <T extends { email: string; suggested: string | null; sources: string[] }>(list: T[], evidence: (e: T) => string): T[] =>
+      list.filter((e) => {
+        if (!isAuto(e.suggested)) return true;
+        autoAccepted.push({
+          email: e.email, suggested: e.suggested, action: 'accept', sources: e.sources,
+          note: `auto-accept (D35): suggestion is a popular provider (${domainOf(e.suggested)}); ${evidence(e)}`,
+        });
+        return false;
+      });
+    obvious.splice(0, obvious.length, ...take(obvious, (e) => e.note));
+    ambiguous.splice(0, ambiguous.length, ...take(ambiguous, (e) => e.reason));
+    if (autoAccepted.length > 0) autoAcceptPath = appendTypoDecisions(layout.overrides, autoAccepted, info.workspace);
+  }
+
   const report: DomainCheckReport = {
     generated_at: new Date().toISOString(),
     dns_checked: dnsChecked,
     total: suspects.length,
     obvious,
     ambiguous,
+    auto_accepted: autoAccepted,
+    auto_accept_path: autoAcceptPath,
   };
 
   const reportPath = writeFileInWorkspace(layout.reports, DOMAIN_CHECK_FILE, renderDomainCheckYaml(report), {
@@ -214,6 +254,26 @@ async function checkDomainsLocked(info: WorkspaceInfo, opts: CheckDomainsOpts): 
   });
 
   return { report, report_path: reportPath, workspace_warnings: info.warnings };
+}
+
+const TYPO_DECISIONS_FILE = 'typo-decisions.yaml';
+
+/**
+ * Append accept decisions to overrides/typo-decisions.yaml, keeping every existing line (comments
+ * included). The existing file must be empty, comments only, or a block-style YAML list.
+ */
+function appendTypoDecisions(overridesDir: string, entries: AutoAcceptedEntry[], workspace: string): string {
+  const file = path.join(overridesDir, TYPO_DECISIONS_FILE);
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const parsed = existing.trim() === '' ? null : parseYaml(existing) as unknown;
+  const blockList = Array.isArray(parsed) && (parsed.length === 0 ? !/^\s*\[/m.test(existing) : /^-\s/m.test(existing));
+  if (parsed !== null && !blockList) {
+    throw new Error(`${TYPO_DECISIONS_FILE} is not a block-style YAML list; fix it before using --auto-accept`);
+  }
+  const items = entries.map(({ email, action, suggested, note }) => ({ email, action, suggested, note }));
+  const block = `# check-domains --auto-accept ${new Date().toISOString()} (D35): suggestions to popular providers\n${stringifyYaml(items)}`;
+  const text = existing === '' ? block : `${existing.endsWith('\n') ? existing : `${existing}\n`}${block}`;
+  return writeFileInWorkspace(overridesDir, TYPO_DECISIONS_FILE, text, { workspace });
 }
 
 /** Local review file with full values and copy-ready entries for overrides/typo-decisions.yaml. */
@@ -227,7 +287,7 @@ export function renderDomainCheckYaml(r: DomainCheckReport): string {
     '# `sources` and `reason` are informational and ignored by overrides/typo-decisions.yaml.',
     '',
   ];
-  return head.join('\n') + stringifyYaml({ obvious: r.obvious, ambiguous: r.ambiguous }, { nullStr: '' });
+  return head.join('\n') + stringifyYaml({ auto_accepted: r.auto_accepted, obvious: r.obvious, ambiguous: r.ambiguous }, { nullStr: '' });
 }
 
 function formatSuggestionForStdout(suggested: string | null): string {
@@ -243,7 +303,7 @@ export function renderDomainCheckSummary(result: DomainCheckResult): string {
   if (r.total === 0) return 'no undecided typo suspects';
 
   const lines: string[] = [
-    `check-domains (dns: ${r.dns_checked ? 'checked' : 'not checked'}): ${r.total} undecided (${r.obvious.length} obvious, ${r.ambiguous.length} ambiguous)`,
+    `check-domains (dns: ${r.dns_checked ? 'checked' : 'not checked'}): ${r.total} undecided (${r.auto_accepted.length} auto-accepted, ${r.obvious.length} obvious, ${r.ambiguous.length} ambiguous)`,
   ];
 
   const section = (title: string, items: string[], hint: string): void => {
@@ -251,6 +311,14 @@ export function renderDomainCheckSummary(result: DomainCheckResult): string {
     for (const item of items.slice(0, SHOW)) lines.push(`  - ${item}`);
     if (items.length > SHOW) lines.push(`  ... and ${items.length - SHOW} more (see ${DOMAIN_CHECK_FILE})`);
   };
+
+  if (r.auto_accepted.length > 0) {
+    section(
+      'Auto-accepted (popular provider)',
+      r.auto_accepted.map((e) => `${maskEmail(e.email)} → ${formatSuggestionForStdout(e.suggested)} (${e.sources.join(', ')})`),
+      `written to ${r.auto_accept_path ?? `overrides/${TYPO_DECISIONS_FILE}`}; run clean-and-merge to apply`,
+    );
+  }
 
   section(
     'Obvious',
@@ -285,9 +353,16 @@ export function buildMaskedJson(result: DomainCheckResult): Record<string, unkno
     dns_checked: r.dns_checked,
     counts: {
       total: r.total,
+      auto_accepted: r.auto_accepted.length,
       obvious: r.obvious.length,
       ambiguous: r.ambiguous.length,
     },
+    auto_accept_path: r.auto_accept_path,
+    auto_accepted: r.auto_accepted.map((e) => ({
+      email: maskEmail(e.email),
+      suggested_provider: domainOf(e.suggested),
+      sources: e.sources,
+    })),
     obvious: r.obvious.map((e) => ({
       email: maskEmail(e.email),
       suggested: maskEmail(e.suggested),
@@ -310,12 +385,14 @@ export function buildMaskedJson(result: DomainCheckResult): Record<string, unkno
 async function main(): Promise<number> {
   const { values } = parseCliArgs(process.argv.slice(2), {
     dns: { type: 'boolean', default: false },
+    'auto-accept': { type: 'boolean', default: false },
   });
   let result: DomainCheckResult;
   try {
     result = await checkDomains({
       workspace: values.workspace as string | undefined,
       dns: values.dns === true,
+      autoAccept: values['auto-accept'] === true,
     });
   } catch (err) {
     if (err instanceof PreconditionError) {

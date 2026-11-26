@@ -19,7 +19,10 @@ agent skills in [`skills/`](skills/); each skill calls CLI scripts in [`scripts/
 4. **Ask a human first** before anything that writes to an external system (provider push), sends
    email, or deletes database content.
 5. **Never rewrite an original email value.** Typo suggestions are flags until a human accepts
-   them in `workspace/overrides/typo-decisions.yaml`.
+   them in `workspace/overrides/typo-decisions.yaml`. Standing exception approved by the human (D35):
+   `check-domains --auto-accept` may append `accept` entries there for suggestions to a curated
+   popular provider (`scripts/lib/rules/providers.json`), each with a note; the original stays in
+   `raw_email`, and a human can override any entry with `reject`.
 6. **Schema changes only through a new migration** in `schema/migrations/` (next number). Never
    edit an applied migration.
 7. **Tests use only `fixtures/`** (synthetic data, `example.com` / `example.jp` / `example.net` /
