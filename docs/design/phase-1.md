@@ -144,14 +144,18 @@ listed values count. No consent column → unknown for every row.
 ### R5 Dates
 Accept `YYYY-MM-DD`, `YYYY/MM/DD`, `YYYY/M/D`, `YYYY.MM.DD`, `YYYY年M月D日`, any of these followed by
 ` H:mm[:ss]`, ISO-8601 datetimes, and Excel serial numbers (1–100000, 1900 date system) when the
-column is a date column. Output `YYYY-MM-DD` or `YYYY-MM-DDTHH:mm:ss` (no timezone conversion).
-Unparseable → null (raw value stays in raw_fields).
+column is a date column. Also English month-name forms as exported by form tools such as Notion:
+`MMMM D, YYYY h:mm A` (`June 28, 2025 11:46 AM`), `MMMM D, YYYY` (`June 28, 2025`), and the same with
+three-letter month abbreviations (`Jun 28, 2025 11:46 AM`, `Jun 28, 2025`); month names case-insensitive,
+12-hour clock with `AM`/`PM` (12 AM = 00, 12 PM = 12). Output `YYYY-MM-DD` or `YYYY-MM-DDTHH:mm:ss`
+(no timezone conversion). Unparseable → null (raw value stays in raw_fields). (Added 2026-11-26 from a
+real-data probe relayed by the user.)
 
 ### R6 Column auto-detection
 Header synonyms (compare after NFKC + lowercase, removing spaces, `_`, `-`):
 - email: email, e-mail, mail, mailaddress, emailaddress, メール, メールアドレス, eメール, 邮箱, 电子邮件, 邮件地址, 电邮
 - name: name, fullname, displayname, username, 氏名, 名前, お名前, 姓名, 名字, 用户名, 联系人
-- created_at: createdat, created, registeredat, signupdate, signedupat, joined, date, 登録日, 登録日時, 申込日, 申込日時, 作成日, 注册时间, 注册日期, 创建时间
+- created_at: createdat, created, registeredat, signupdate, signedupat, joined, date, 登録日, 登録日時, 申込日, 申込日時, 作成日, 注册时间, 注册日期, 创建时间, submissiontime, submittedat, 提交时间
 - last_seen_at: updatedat, lastseen, lastlogin, lastloginat, lastactive, 最終ログイン, 最終ログイン日時, 更新日, 更新日時, 最后登录, 最后登录时间
 - locale: locale, language, lang, 言語, 语言
 - consent: consent, newsletter, optin, subscribe, subscribed, marketing, メルマガ, メルマガ配信, メールマガジン, 配信希望, ニュースレター, 订阅, 订阅邮件, 接收邮件
@@ -179,3 +183,20 @@ addresses in one cell, empty cells, invalid syntax, role addresses, typo domains
 `example.co.jo`), legacy mobile dots, Gmail-style dot and `+tag` variants that must NOT merge,
 in-file duplicates, cross-source duplicates, a test account for `exclude.yaml`, granted/denied/unknown
 consent and a consent change between the two dated exports.
+Also one form-export source (added 2026-11-26): UTF-8-with-BOM CSV whose date column uses the English
+month-name format of R5 (`June 28, 2025 11:46 AM`, `Jun 3, 2025 9:05 PM`, `December 1, 2024`), a
+`Submission time` header, plus in the same directory a second CSV with the same rows in a different
+column order (a duplicate export) and a subdirectory with per-entry `.md` pages; meta.md lists only
+the first CSV.
+
+### R9 Source directory contents (add-source and loadMeta)
+- Only regular files directly in `resources/<source>/` are candidates; subdirectories are ignored
+  and reported ("subdirectory ignored: <name>/"). `meta.md`, `meta.draft.md`, `NOTES.txt` and `.md`
+  files are never data files.
+- add-source detects **suspected duplicate files**: two candidate files with the same set of
+  headers (order ignored) and the same multiset of rows after reordering columns to a common order
+  (compare a hash per row). In the draft, the first of each group (by name) is listed under `files:`;
+  the others are written as commented-out entries with `# suspected duplicate of <file>`, and the
+  summary asks the human to confirm. Files with the same headers but different rows are both listed.
+- loadMeta warns about data files present but not listed (already in T6), and staging reads only the
+  files listed in meta.md.
