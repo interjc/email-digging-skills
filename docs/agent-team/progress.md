@@ -18,6 +18,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 
 ## Next-up queue
 
+- Next round (user 2026-11-26): automatic domain-typo check and fix. Domain existence via DNS MX (not ping), known providers one character off, prefer an existing open-source checker. Research on Grok (web-research route). Needs a decision on data rule 5 (auto-accept vs flag only) before implementation.
 1. T10 part 2: ask the user to confirm real files + meta.md, then dry-run, then merge (masked output only).
 
 ## Session choice
