@@ -1,0 +1,26 @@
+{
+  "name": "email-digging-skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted mailing-list pipeline: collect, tag, clean, dedupe and merge customer email exports into one queryable SQLite database. Ships as agent skills.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "packageManager": "pnpm@12.23.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test --experimental-test-isolation=none \"scripts/**/*.test.ts\"",
+    "check:emails": "node scripts/check-staged-emails.ts",
+    "init-workspace": "node scripts/init-workspace.ts"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "2.0.1-r.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.10",
+    "typescript": "^7.0.2"
+  }
+}

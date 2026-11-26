@@ -1,0 +1,28 @@
+# Copy to config.yaml (git-ignored). init-workspace does this for you.
+# Everything specific to you (source names, priorities, provider settings) belongs here
+# or in the workspace, never in the repository.
+
+# Where real data lives. MAIL_PIPELINE_WORKSPACE overrides this. Relative paths resolve
+# against the repository root. Default: ./workspace (git-ignored).
+workspace: ./workspace
+
+sources:
+  # Merge priority for fields like name: first listed wins.
+  # Sources not listed follow, newest exported_at first, then by name.
+  priority: []
+  #  - product-a
+  #  - event-2023-tokyo
+
+consent:
+  # Sources with these consent_basis values count as opt-in for the strict sendable list.
+  opt_in_bases: [opt_in]
+  # Extra sources that count as opt-in whatever their basis (decide this carefully).
+  opt_in_sources: []
+
+masking:
+  # Keep real domains in masked exports so the domain distribution stays visible.
+  keep_domain: true
+
+backups:
+  # Database backups kept in workspace/database/backups/ (oldest are pruned).
+  keep: 20
