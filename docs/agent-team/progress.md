@@ -35,7 +35,7 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 <!-- questions only the human can answer; never delete, mark answered -->
 - [open] Backups: requirements §12 says backups must be encrypted. Local pre-merge backups in workspace/database/backups/ are unencrypted for now (same protection as the main db). Encrypt them, or only encrypt off-machine copies?
 - [open] Paid verification service (requirements §13) — not needed for phase 1.
-- [open] Real-data run: confirm files are placed in workspace/resources/ before T10.
+- [answered 2026-11-26 by the user, via side chat] Real-data run: the first real source is placed in workspace/resources/ (UTF-8-BOM form export). Its meta.md details are being settled with the user in the side chat. Before T10, still check that its meta.md exists and ask whether more sources are coming.
 
 ## Pitfalls
 
