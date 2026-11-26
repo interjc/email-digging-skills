@@ -1,0 +1,33 @@
+{
+  "exact": {
+    "gmial.com": "gmail.com",
+    "gmai.com": "gmail.com",
+    "gnail.com": "gmail.com",
+    "gmail.co": "gmail.com",
+    "gmail.cm": "gmail.com",
+    "hotmial.com": "hotmail.com",
+    "hotmai.com": "hotmail.com",
+    "outlok.com": "outlook.com",
+    "yahoo.co.jo": "yahoo.co.jp",
+    "yahoo.cojp": "yahoo.co.jp",
+    "yaho.co.jp": "yahoo.co.jp",
+    "docomo.ne.jo": "docomo.ne.jp",
+    "docomo.co.jp": "docomo.ne.jp",
+    "ezweb.ne.jo": "ezweb.ne.jp",
+    "ezweb.co.jp": "ezweb.ne.jp",
+    "softbank.ne.jo": "softbank.ne.jp",
+    "i.softbank.jo": "i.softbank.jp",
+    "icloud.co": "icloud.com",
+    "me.co": "me.com",
+    "icoud.com": "icloud.com"
+  },
+  "suffix": {
+    ".co.jo": ".co.jp",
+    ".ne.jo": ".ne.jp",
+    ".or.jo": ".or.jp",
+    ".con": ".com",
+    ".cmo": ".com",
+    ".comm": ".com",
+    ".nett": ".net"
+  }
+}
