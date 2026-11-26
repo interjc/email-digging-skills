@@ -78,3 +78,104 @@ Open (not needed for phase 1, asked later): verification service; which real sou
 - Re-run with unchanged inputs → identical contacts/consents/contact_sources; `imports` and `runs` gain rows.
 - Address removed from all sources → `orphaned_at` set, excluded from both sendable views, reported.
 - Suppression from override → inserted once (UNIQUE), never removed by the pipeline.
+
+## Rule details (single source for briefs; T1 turns these into the spec docs)
+
+### R1 Email normalization (`normalizeEmailCell`)
+1. `null`/`undefined`/whitespace-only → one candidate, `rejectReason: 'empty'`.
+2. Clean: NFKC (full-width ＠ ． letters → ASCII; flag `width_normalized` when NFKC changed the address part),
+   remove invisible characters (U+200B–U+200D, U+2060, U+FEFF, U+00AD, control chars), trim
+   (incl. U+3000), strip `mailto:` (case-insensitive) and surrounding `<>`, `"`, `'`, `()`, `[]`;
+   from `Name <addr>` keep `addr`.
+3. Split a cell on `,` `;` `、` `，` `；` `|`, newlines and whitespace into several addresses;
+   each gets `split_from_multi` when the cell produced 2+ non-empty parts. Duplicate parts in the
+   same cell collapse to one.
+4. Lowercase the whole address.
+5. Syntax (after cleaning): exactly one `@`; local part 1–64 chars of `A-Za-z0-9.!#$%&'*+/=?^_`{|}~-`;
+   domain: 2+ labels of `[a-z0-9-]` (no leading/trailing hyphen), TLD alphabetic 2+ chars, total ≤ 254.
+   Anything else → `rejectReason: 'invalid_syntax'`, `email: null`, `raw` kept.
+6. Local part with consecutive dots, a leading dot or a trailing dot (old docomo/au addresses):
+   valid, flag `legacy_mobile_dots`.
+7. Role address: local part (before any `+`) in the role list (`scripts/lib/rules/role-locals.json`:
+   info, support, contact, admin, administrator, noreply, no-reply, donotreply, do-not-reply, sales,
+   help, office, webmaster, postmaster, hostmaster, abuse, billing, marketing, newsletter, team,
+   hello, inquiry, enquiries, press, pr, jobs, recruit, hr, mail, service, customer, cs, お問い合わせ is not
+   ASCII so not needed) → `status: 'role'`, flag `role_address`.
+8. Typo: domain in `scripts/lib/rules/domain-typos.json` (exact map, e.g. gmial.com, gmai.com,
+   gnail.com, gmail.co, gmail.cm, hotmial.com, hotmai.com, outlok.com, yahoo.co.jo, yahoo.cojp,
+   yaho.co.jp, docomo.ne.jo, docomo.co.jp, ezweb.ne.jo, ezweb.co.jp, softbank.ne.jo, i.softbank.jo,
+   icloud.co, icoud.com, me.co …) or a suffix rule (`.co.jo`→`.co.jp`, `.ne.jo`→`.ne.jp`,
+   `.or.jo`→`.or.jp`, `.con`→`.com`, `.cmo`→`.com`, `.comm`→`.com`, `.nett`→`.net`) →
+   `status: 'typo_suspect'`, flag `typo_suspect`, `suggestion` = local@corrected-domain. Never rewrite.
+   Precedence of status: typo_suspect > role > valid (flags keep both).
+9. No Gmail dot/plus folding; `+tag` stays part of the address.
+
+### R2 Masking (`scripts/lib/mask.ts`)
+- `maskEmail('taro@gmail.com')` → `t***@g***l.com`: local = first char + `***`; domain = first label
+  masked as first char + `***` + last char (labels of 1–2 chars → first char + `***`), remaining
+  labels kept (`docomo.ne.jp` → `d***o.ne.jp`). Invalid input → `***`.
+- `maskName('山田太郎')` → `山***`; `'山田'` → `山*`: first character (grapheme) + one `*` per remaining
+  character, at most 3. Empty → empty.
+- `maskPhone('090-1234-5678')` → every digit except the last two becomes `*`, separators kept.
+- `maskValue(field, value)`: field name containing email/mail/メール/邮箱 → maskEmail; name/氏名/名前/姓名
+  → maskName; phone/tel/電話/电话 → maskPhone; address/住所/地址 → first 2 chars + `***`; anything else
+  unchanged.
+- `hmacLocalPart(email, key, {keepDomain=true})` → `u` + first 16 hex chars of HMAC-SHA256(key, full
+  normalized email) + `@` + (domain, or `d` + 8 hex of HMAC-SHA256(key, 'domain:' + domain) + `.invalid`).
+  Same input → same output; different keys → different output. Throws if key is empty.
+
+### R3 Consent values (defaults when meta.md has no `consent_values`)
+Compare after NFKC + trim + lowercase. granted: `1, true, yes, y, on, 是, 配信する, 配信希望, 希望する,
+受け取る, 受信する, 購読, 購読する, subscribed, subscribe, opt-in, optin, ○, 〇, ◯`. denied: `0, false, no,
+n, off, 否, 配信しない, 配信停止, 希望しない, 受け取らない, 受信しない, 購読しない, unsubscribed, unsubscribe,
+opt-out, optout, ×, ✕`. Anything else (and empty) → unknown. With `consent_values` in meta.md only the
+listed values count. No consent column → unknown for every row.
+
+### R4 Encoding resolution (text formats)
+1. meta.md encoding other than `auto` → use it (`encodingHow: 'meta'`); a decode error is a hard error.
+2. BOM: EF BB BF → utf-8-sig; FF FE → utf-16le; FE FF → utf-16be (`'bom'`).
+3. Try in order with `TextDecoder(label, {fatal: true})`: utf-8, cp932 (WHATWG label `shift_jis`,
+   which is Windows-31J: decodes ①, ㈱, 髙), gb18030 (`'detected'`). When both cp932 and gb18030
+   decode, prefer the one whose header row matches more column synonyms, then the one with kana
+   (U+3040–U+30FF) for cp932; list every candidate in `encodingCandidates`; the report asks for
+   confirmation of every `detected` result.
+4. Decoded text is written as UTF-8 (no BOM) to `output/staging/<source>/_decoded/` and read by DuckDB.
+
+### R5 Dates
+Accept `YYYY-MM-DD`, `YYYY/MM/DD`, `YYYY/M/D`, `YYYY.MM.DD`, `YYYY年M月D日`, any of these followed by
+` H:mm[:ss]`, ISO-8601 datetimes, and Excel serial numbers (1–100000, 1900 date system) when the
+column is a date column. Output `YYYY-MM-DD` or `YYYY-MM-DDTHH:mm:ss` (no timezone conversion).
+Unparseable → null (raw value stays in raw_fields).
+
+### R6 Column auto-detection
+Header synonyms (compare after NFKC + lowercase, removing spaces, `_`, `-`):
+- email: email, e-mail, mail, mailaddress, emailaddress, メール, メールアドレス, eメール, 邮箱, 电子邮件, 邮件地址, 电邮
+- name: name, fullname, displayname, username, 氏名, 名前, お名前, 姓名, 名字, 用户名, 联系人
+- created_at: createdat, created, registeredat, signupdate, signedupat, joined, date, 登録日, 登録日時, 申込日, 申込日時, 作成日, 注册时间, 注册日期, 创建时间
+- last_seen_at: updatedat, lastseen, lastlogin, lastloginat, lastactive, 最終ログイン, 最終ログイン日時, 更新日, 更新日時, 最后登录, 最后登录时间
+- locale: locale, language, lang, 言語, 语言
+- consent: consent, newsletter, optin, subscribe, subscribed, marketing, メルマガ, メルマガ配信, メールマガジン, 配信希望, ニュースレター, 订阅, 订阅邮件, 接收邮件
+Exact synonym match → confidence 0.9; synonym contained in header → 0.7. Email column fallback:
+the column whose first 200 non-empty values contain `@` (after NFKC) most often, if ≥ 50% → `content_sniff`
+with confidence = that share. meta.md mapping → confidence 1. Mappings below 0.8 are listed for review.
+
+### R7 Staged-email scan (pre-commit and CI)
+Find `local@domain` patterns in staged (or, with `--all`, all tracked) files. Allowed everywhere:
+domains `example.com|jp|net|org` and other `example.<suffix>` test variants (e.g. `example.con`,
+`example.co.jo`, used to exercise typo rules), `*.example`, `*.test`, `*.invalid`, `localhost`,
+and masked forms containing `*`. A line containing `email-scan:allow` is skipped (for unit tests of
+real-provider typo rules such as gmial.com). Text files are scanned as UTF-8, UTF-16 (BOM) and, when
+those fail, cp932 and gb18030; `.xlsx` files are unzipped in memory and their XML scanned; SQLite and
+other binaries are scanned for ASCII runs. Exit 1 listing `file:line` and the masked address.
+
+### R8 Fixtures (`fixtures/`)
+Synthetic sources only, generated by `scripts/make-fixtures.ts` (deterministic; committed output):
+`fixtures/sources/<source>/{meta.md, files}`, `fixtures/overrides/*.yaml`, `fixtures/expected.json`.
+Must cover: cp932 CSV with Japanese headers and two dated exports of the same source; gb18030 CSV
+with a 4-byte character in a name; UTF-16LE TSV (`.txt`) with `encoding: auto`; UTF-8-with-BOM CSV with
+no column mapping (auto-detect); XLSX; SQLite `.db` with a table; JSON array; a CSV with `header_row: 3`.
+Anomalies: full-width `＠`, `mailto:`, `<…>`, `Name <addr>`, zero-width spaces, mixed case, several
+addresses in one cell, empty cells, invalid syntax, role addresses, typo domains (`example.con`,
+`example.co.jo`), legacy mobile dots, Gmail-style dot and `+tag` variants that must NOT merge,
+in-file duplicates, cross-source duplicates, a test account for `exclude.yaml`, granted/denied/unknown
+consent and a consent change between the two dated exports.
