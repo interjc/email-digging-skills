@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security & Privacy Vulnerability
+    url: https://github.com/interjc/email-digging-skills/blob/main/SECURITY.md
+    about: Do not report data leaks, masking bypasses, or security vulnerabilities in public issues. Follow SECURITY.md to report privately.

@@ -2,6 +2,8 @@
 
 Thank you for contributing to `email-digging-skills`. Because this repository is a public, generic toolkit designed to run locally on sensitive customer data, contributions must keep strict boundaries between generic code and user-specific data.
 
+Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). If you discover a data-leak, masking-bypass, or security vulnerability, **do not open a public issue** — report it privately as described in [SECURITY.md](SECURITY.md).
+
 ## Development setup
 
 1. Install **Node.js `>= 22.18`** and **`pnpm`** (`pnpm@12.23.0`).
@@ -68,7 +70,7 @@ Never commit or include in pull requests, issues, comments, or tests:
 
 ## Pull request checklist
 
-Run all three checks locally before opening a pull request:
+Use the [pull request template](.github/PULL_REQUEST_TEMPLATE.md) and run all three checks locally before opening a pull request:
 
 ```sh
 pnpm typecheck

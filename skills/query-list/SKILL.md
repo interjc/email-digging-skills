@@ -7,7 +7,7 @@ description: Runs read-only preset or custom SELECT queries against the merged S
 
 ## Purpose
 
-Queries `workspace/database/mail-list.sqlite` in read-only mode (`PRAGMA query_only = ON`, single `SELECT` or `WITH ... SELECT` statement only). Results printed to `stdout` are masked fail-closed (D33): a text value is shown as-is only when SQLite traces its column to a known non-personal column (ids, dates, statuses, source names, flags, file names) or a preset declares it safe; emails and names get their field masks, `raw_value`/`note` become `<redacted>`, and computed expressions, unknown columns, `raw_fields` and consent `evidence` are masked as free text. Numbers pass, so counts and aggregates over ids work. Meanwhile `--out` streams full unmasked results to a local CSV in `workspace/output/exports/` without printing personal data.
+Queries `workspace/database/mail-list.sqlite` in read-only mode (`PRAGMA query_only = ON`, single `SELECT` or `WITH ... SELECT` statement only). Results printed to `stdout` are masked fail-closed (D33): a text value is shown as-is only when SQLite traces its column to a known non-personal column (ids, dates, statuses, source names, flags, file names) or a preset declares it safe; emails get their field mask, `email_domain` is domain-masked outside the `domains` preset, `raw_value`/`note` become `<redacted>`, `raw_fields` and consent `evidence` have their JSON leaf values redacted, and names, computed expressions, and unknown columns are masked as free text. Numbers pass, so counts and aggregates over ids work. Meanwhile `--out` streams full unmasked results to a local CSV in `workspace/output/exports/` without printing personal data.
 
 ## Preconditions
 

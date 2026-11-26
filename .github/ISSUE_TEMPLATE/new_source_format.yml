@@ -1,0 +1,39 @@
+name: New source format
+description: Request support for a file format or export layout the readers do not handle yet
+labels: ["source-format"]
+body:
+  - type: checkboxes
+    id: data-removal
+    attributes:
+      label: Data privacy confirmation
+      options:
+        - label: "I removed all real email addresses, names and customer data; examples use example.com / example.jp"
+          required: true
+  - type: input
+    id: format
+    attributes:
+      label: File format
+      placeholder: e.g. .csv, .tsv, .xlsx, .json, .sqlite, or another format
+    validations:
+      required: true
+  - type: input
+    id: encoding
+    attributes:
+      label: Text encoding
+      placeholder: e.g. utf-8, cp932, gb18030, utf-16le, n/a (binary), or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: header-layout
+    attributes:
+      label: Header layout
+      description: Describe the header and preamble layout in words, or provide a synthetic 3-row sample using example.com / example.jp addresses only.
+    validations:
+      required: true
+  - type: textarea
+    id: add-source-output
+    attributes:
+      label: What add-source printed (masked)
+      description: Paste the masked output from `node scripts/add-source.ts <source>` (never paste raw data files or pending-decisions.yaml).
+    validations:
+      required: true

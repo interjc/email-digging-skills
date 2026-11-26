@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose a new feature, provider adapter, or pipeline improvement
+labels: ["enhancement"]
+body:
+  - type: checkboxes
+    id: data-removal
+    attributes:
+      label: Data privacy confirmation
+      options:
+        - label: "I removed all real email addresses, names and customer data; examples use example.com / example.jp"
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe the workflow gap or requirement without referencing real source names, product names, or customer data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Synthetic example
+      description: Optional example using example.com / example.jp addresses only.

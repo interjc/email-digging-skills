@@ -78,7 +78,7 @@ node scripts/export.ts --workspace workspace/.demo --provider listmonk
 
 ## Pipeline steps and skills
 
-Every step is documented as an agent skill in [`skills/`](skills/) and backed by a CLI in [`scripts/`](scripts/):
+Every step is documented as an agent skill in [`skills/`](skills/README.md) and backed by a CLI in [`scripts/`](scripts/):
 
 | Step | Skill | CLI command | What it does |
 |---|---|---|---|
@@ -90,7 +90,7 @@ Every step is documented as an agent skill in [`skills/`](skills/) and backed by
 | 6 | [`mask-data`](skills/mask-data/SKILL.md) | `node scripts/mask-data.ts [--hash-domain] [--shape]` | Writes an HMAC-pseudonymized SQLite copy (`mail-list-masked.sqlite`) and optional `shape.json` to `workspace/output/masked/`. |
 | 7 | [`export-to-provider`](skills/export-to-provider/SKILL.md) | `node scripts/export.ts --provider listmonk` | Writes a local Listmonk dry-run CSV (`strict` list by default) to `workspace/output/exports/` and records `sync_log`. |
 
-Detailed specifications live in [`docs/`](docs/):
+Detailed specifications live in [`docs/`](docs/README.md):
 - [Database schema & views](docs/schema.md)
 - [Cleaning, encoding, date & merge rules](docs/cleaning-rules.md)
 - [Source metadata (`meta.md`) template](docs/meta-template.md)
@@ -132,7 +132,7 @@ email-digging-skills/
 
 1. **Workspace isolation & Git guard**: `workspace/*`, `config.yaml`, `.env*`, and data-file extensions (`*.sqlite`, `*.csv`, `*.xlsx`, `*.parquet`, etc. outside `fixtures/`) are git-ignored. Every CLI runs `checkWorkspaceSafety` first and exits `2` if the workspace (or any symlinked subdirectory) could be tracked by Git. You can place the workspace outside the repository via `MAIL_PIPELINE_WORKSPACE` or `config.yaml` (avoid cloud-synced folders like iCloud, Dropbox, OneDrive, or Google Drive).
 2. **Read-only originals & no silent rewrites**: files in `workspace/resources/` are never modified. Suspected domain typos (such as `member@example.con` → `member@example.com`) are only flagged until a human explicitly accepts them in `workspace/overrides/typo-decisions.yaml`, and `raw_email` is always preserved.
-3. **Default output masking**: CLI summaries, error traces, query stdout, and run reports sanitize and mask personal fields (`t***@e***e.jp`, `山***`, `***-****-**12`).
+3. **Default output masking (fail-closed queries)**: CLI summaries, error traces, JSON output, query stdout, and run reports sanitize and mask personal fields (`t***@e***e.jp`, `山***`, `***-****-**12`). Query stdout masking is fail-closed: only known non-personal columns or preset-safe columns pass as-is (address-sanitized), while computed expressions, unknown columns, and unredacted JSON values are masked.
 4. **Pre-commit & CI scanning**: `.githooks/pre-commit` runs `node scripts/check-staged-emails.ts` (scanning UTF-8, UTF-16, CP932, GB18030, `.xlsx` XML, and binaries for non-`example.*` addresses) plus `gitleaks` when installed; GitHub Actions CI enforces both on every push and pull request.
 5. **Strict sharing boundary**: **only files inside `workspace/output/masked/` may leave your machine** (after human review), and `MASK_HMAC_KEY` in `.env` must never be shared.
 
@@ -143,13 +143,16 @@ email-digging-skills/
 
 ## Consent and compliance note
 
-Consent is recorded per `(contact, source)` along with original column/value evidence, and `suppressions` are append-only and override every grant. Exports default to `v_sendable_strict`, which requires positive consent (`granted` in a source or membership in a source configured to count as opt-in), no `denied` status in any source, no suppression, and no unresolved `typo_suspect`. Requesting the looser `v_not_blocked` view requires `--list not_blocked` and prints an explicit warning.
+Consent is recorded per `(contact, source)` along with original column/value evidence, and `suppressions` are append-only and override every grant. Exports default to `v_sendable_strict`, which requires positive consent (`granted` in a source or membership in a source configured to count as opt-in), no `denied` status in any source, no suppression, and no unresolved `typo_suspect`. Requesting the looser `v_not_blocked` view requires `--list not_blocked` and prints an explicit warning to `stderr`.
 
 Anti-spam and privacy laws (including Japan's Act on Regulation of Transmission of Specified Electronic Mail / 特定電子メール法, GDPR, and CAN-SPAM) impose strict opt-in and evidence requirements for marketing mail. **This software and documentation do not constitute legal advice.** Always verify compliance for your jurisdiction, obtain explicit human approval before any external upload or send, and run bounce verification on your planned send list to protect sender reputation.
 
-## Contributing
+## Contributing, security, and changelog
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, TypeScript conventions, synthetic fixture regeneration, pre-commit checks, and how to add a provider adapter.
+- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, TypeScript conventions, synthetic fixture regeneration, pre-commit checks, and how to add a provider adapter.
+- **Code of Conduct**: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- **Security & privacy reporting**: see [SECURITY.md](SECURITY.md) before reporting any leak, masking bypass, or vulnerability (never attach real customer data).
+- **Changelog**: see [CHANGELOG.md](CHANGELOG.md) for Phase 1 features and known limitations.
 
 ## License
 

@@ -78,7 +78,7 @@ node scripts/export.ts --workspace workspace/.demo --provider listmonk
 
 ## 流水线步骤与 Skills 对照
 
-每个流水线步骤都对应 [`skills/`](skills/) 下的一个标准 Skill，并调用 [`scripts/`](scripts/) 中的命令行脚本：
+每个流水线步骤都对应 [`skills/`](skills/README.md) 下的一个标准 Skill，并调用 [`scripts/`](scripts/) 中的命令行脚本：
 
 | 步骤 | Skill | 命令行脚本 | 作用 |
 |---|---|---|---|
@@ -90,7 +90,7 @@ node scripts/export.ts --workspace workspace/.demo --provider listmonk
 | 6 | [`mask-data`](skills/mask-data/SKILL.md) | `node scripts/mask-data.ts [--hash-domain] [--shape]` | 在 `workspace/output/masked/` 下生成 HMAC 假名化的 SQLite 副本（`mail-list-masked.sqlite`）及可选的数据形状摘要 `shape.json`。 |
 | 7 | [`export-to-provider`](skills/export-to-provider/SKILL.md) | `node scripts/export.ts --provider listmonk` | 在 `workspace/output/exports/` 下生成 Listmonk 本地 dry-run 导入 CSV（默认使用 `strict` 严格名单）并记录 `sync_log`。 |
 
-详细规则文档见 [`docs/`](docs/)（英文）：
+详细规则文档见 [`docs/`](docs/README.md)（英文）：
 - [数据库表结构与视图说明](docs/schema.md)
 - [清洗、编码、日期与合并规则](docs/cleaning-rules.md)
 - [数据源元数据（`meta.md`）模板](docs/meta-template.md)
@@ -132,7 +132,7 @@ email-digging-skills/
 
 1. **工作区隔离与 Git 防提交守卫**：`.gitignore` 默认忽略 `workspace/*`、`config.yaml`、`.env*` 以及仓库内除 `fixtures/` 以外的所有数据文件后缀（`*.sqlite`、`*.csv`、`*.xlsx`、`*.parquet` 等）。每个 CLI 启动时都会运行 `checkWorkspaceSafety`，一旦发现工作区（或其任何符号链接子目录）可能被 Git 跟踪，立即以退出码 `2` 拒绝执行。建议通过 `MAIL_PIPELINE_WORKSPACE` 或 `config.yaml` 将真实工作区放在非云盘同步目录（避开 iCloud、Dropbox、OneDrive、Google Drive）。
 2. **原始文件只读且绝不暗中改写邮箱**：`workspace/resources/` 下的导出文件永不修改。疑似拼写错误的域名（如 `member@example.con` → `member@example.com`）仅做标记并给出建议，只有在人工写入 `workspace/overrides/typo-decisions.yaml` 确认接受后才更新规范化邮箱，且始终保留 `raw_email` 原值。
-3. **默认展示脱敏**：CLI 终端输出、报错信息、查询标准输出与清洗报告均经过地址清洗与字段脱敏（`t***@e***e.jp`、`山***`、`***-****-**12`）。
+3. **默认展示脱敏（查询 fail-closed 闭锁）**：CLI 终端输出、报错信息、JSON 输出、查询标准输出与清洗报告均经过地址清洗与字段脱敏（`t***@e***e.jp`、`山***`、`***-****-**12`）。`query` 标准输出采用 fail-closed（默认兜底脱敏）策略：仅已知非个人字段或预设声明安全的列会原样放行（仍做邮箱地址清洗），计算表达式、未知列及 JSON 中的个人字段都会被自动脱敏。
 4. **提交前钩子与 CI 扫描**：`.githooks/pre-commit` 自动运行 `node scripts/check-staged-emails.ts`（支持扫描 UTF-8、UTF-16、CP932、GB18030、`.xlsx` 内部 XML 及二进制文件中的非 `example.*` 邮箱）并在本机安装了 `gitleaks` 时扫描密钥；GitHub Actions CI 在每次推送与 PR 时强制执行全量检查。
 5. **严格的数据外发边界**：**只有 `workspace/output/masked/` 目录下的脱敏副本在经人工审阅后可以离开本机**，且 `.env` 中的 `MASK_HMAC_KEY` 严禁外传。
 
@@ -147,9 +147,12 @@ email-digging-skills/
 
 各国反垃圾邮件与隐私法规（如日本《特定電子メール法》、GDPR、CAN-SPAM 等）对营销邮件的事前同意与证据留存有严格规定。**本仓库代码与文档不构成任何法律意见。** 请在发信前自行核实所在司法辖区的合规要求，在任何向外部系统上传或发信前取得明确人工确认，并对拟发送名单做邮箱有效性验证以控制退信率。
 
-## 参与贡献
+## 参与贡献、安全与变更记录
 
-开发环境配置、TypeScript 编码规范、合成测试数据生成、提交前检查及新增 Provider 插件指南请参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- **参与贡献**：开发环境配置、TypeScript 编码规范、合成测试数据生成、提交前检查及新增 Provider 插件指南请参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- **行为准则**：请参见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+- **安全与隐私漏洞报告**：如发现信息泄露、脱敏绕过或其他安全问题，请先阅读 [SECURITY.md](SECURITY.md) 并通过 GitHub 私密通道报告，严禁附带任何真实客户数据。
+- **变更记录**：第一阶段功能与已知限制请参见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开源许可证
 

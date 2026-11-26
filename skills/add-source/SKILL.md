@@ -7,7 +7,7 @@ description: Creates or probes a customer data source directory under workspace/
 
 ## Purpose
 
-Onboards a source directory `workspace/resources/<name>/` (`<name>` uses lowercase letters, digits, and single hyphens, such as `product-a` or `event-2025-tokyo`). It probes regular data files (`.csv`, `.tsv`/`.txt`, `.xlsx`, `.json`, `.db`/`.sqlite`), detects text encodings and standard column mappings (`email`, `name`, `created_at`, `last_seen_at`, `locale`, `consent`), flags suspected duplicate files, prints up to three masked sample values per mapped column, and writes a metadata draft.
+Onboards a source directory `workspace/resources/<name>/` (`<name>` uses lowercase letters, digits, and single hyphens, such as `product-a` or `event-2025-tokyo`). It probes regular data files (`.csv`, `.tsv`/`.txt`, `.xlsx`, `.json`/`.jsonl`, `.db`/`.sqlite`/`.sqlite3`), detects text encodings and standard column mappings (`email`, `name`, `created_at`, `last_seen_at`, `locale`, `consent`), flags suspected duplicate files, prints up to three masked sample values per mapped column, and writes a metadata draft.
 
 ## Preconditions
 
@@ -49,6 +49,6 @@ Exit codes: `0` ok; `1` invalid source name or CLI arguments; `2` workspace prec
 
 ## Never do
 
-- Never read raw data files (`.csv`, `.tsv`, `.txt`, `.xlsx`, `.json`, `.db`, `.sqlite`) into context or print full email addresses.
+- Never read raw data files (`.csv`, `.tsv`, `.txt`, `.xlsx`, `.json`, `.jsonl`, `.db`, `.sqlite`, `.sqlite3`) into context or print full email addresses.
 - Never overwrite an existing `meta.md` automatically or modify/delete files in `workspace/resources/`.
 - Never write to external providers without human confirmation or delete database content.

@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a bug in a pipeline CLI, reader, cleaner, merge, or skill
+labels: ["bug"]
+body:
+  - type: checkboxes
+    id: data-removal
+    attributes:
+      label: Data privacy confirmation
+      options:
+        - label: "I removed all real email addresses, names and customer data; examples use example.com / example.jp"
+          required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command or skill affected
+      placeholder: e.g. node scripts/clean-and-merge.ts --dry-run
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Paste masked CLI output or error messages only. Never paste unmasked exports or pending-decisions.yaml.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Synthetic reproduction steps
+      description: Reproduce with fixtures/ or synthetic example.com / example.jp addresses only.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: e.g. macOS 15, Node.js v24.x, pnpm 12.23.0
