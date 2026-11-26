@@ -11,7 +11,7 @@
   "packageManager": "pnpm@12.23.0",
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
-    "test": "node --test --experimental-test-isolation=none \"scripts/**/*.test.ts\"",
+    "test": "node --test --experimental-test-isolation=none \"scripts/**/*.test.ts\" \"providers/**/*.test.ts\"",
     "check:emails": "node scripts/check-staged-emails.ts",
     "init-workspace": "node scripts/init-workspace.ts"
   },
