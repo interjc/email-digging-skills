@@ -38,6 +38,8 @@ Back to the [board](README.md). Dates are absolute (YYYY-MM-DD). Acceptance numb
 - [open] Paid verification service (requirements §13) — not needed for phase 1.
 - [answered 2026-11-26 by the user, via side chat] Real-data run: the first real source is placed in workspace/resources/ (UTF-8-BOM form export). Its meta.md details are being settled with the user in the side chat. Before T10, still check that its meta.md exists and ask whether more sources are coming.
 
+- [open] 2026-11-26 Real-data run: the user confirmed 4 source folders are complete for this round (3 still without meta.md); first run **not yet** approved (user answered "Not yet"). Wait for the user's go-ahead, then init-workspace → add-source ×3 (drafts) → review drafts with the user → clean-and-merge --dry-run → merge.
+
 ## Pitfalls
 
 | Location | What it is | Why it is this way | Guidance |
