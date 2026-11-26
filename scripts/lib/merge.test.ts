@@ -54,9 +54,9 @@ function sourceNames(layout: WorkspaceLayout): string[] {
 let runCounter = 0;
 
 /** Stage the given sources (default all) and merge them, like clean-and-merge does. */
-async function run(w: Ws, opts: { sources?: string[]; overrides?: Overrides; config?: PipelineConfig } = {}): Promise<{ stats: MergeStats; warnings: string[]; results: SourceStageResult[]; metas: SourceMeta[] }> {
+async function run(w: Ws, opts: { overrides?: Overrides; config?: PipelineConfig } = {}): Promise<{ stats: MergeStats; warnings: string[]; results: SourceStageResult[]; metas: SourceMeta[] }> {
   const overrides = opts.overrides ?? loadOverrides(w.layout.overrides);
-  const names = opts.sources ?? sourceNames(w.layout);
+  const names = sourceNames(w.layout); // D30: every merge gets every source with meta.md
   const metas = names.map((n) => loadMeta(path.join(w.layout.resources, n)));
   const results: SourceStageResult[] = [];
   for (const m of metas) results.push(await stageSource(m, { stagingDir: w.layout.staging, overrides }));
@@ -124,6 +124,7 @@ test('merge: totals match fixtures/expected.json after overrides', async () => {
   assert.equal(stats.cross_source_dups, expected.cross_source_dups);
   assert.deepEqual(stats.overlap, expected.overlap);
   assert.equal(stats.contacts_orphaned, 0);
+  // typo: one original rewritten (accept) + one kept (reject); suppressions: rows newly inserted
   assert.deepEqual(stats.overrides_applied, { typo: 2, suppressions: 1, consents: 0, exclude: 1 });
   assert.deepEqual(warnings, []);
   // D8 with no configured priority: exported_at desc.
@@ -185,6 +186,7 @@ test('merge: re-run with the same inputs keeps contacts (ids), contact_sources a
   assert.deepEqual(second, first);
   assert.equal(stats.contacts_new, 0);
   assert.equal(stats.contacts_total, expected.contacts_total);
+  assert.deepEqual(stats.overrides_applied, { typo: 2, suppressions: 0, consents: 0, exclude: 1 }, 'nothing newly inserted');
   assert.equal(Number(get(w.db, 'SELECT COUNT(*) AS n FROM suppressions')?.n), 1);
   assert.equal(Number(get(w.db, 'SELECT COUNT(*) AS n FROM imports')?.n), 20);
   // rejected_rows are replaced, not accumulated.
@@ -311,22 +313,96 @@ test('suppression override: the address stays a contact but leaves both sendable
   w.db.close();
 });
 
-test('partial run (--source): other sources keep their rows; sources gone from resources/ only warn', async () => {
+test('withdrawn consent override: the source denial comes back and the contact leaves v_sendable_strict', async () => {
+  const w = fixtureWorkspace();
+  const base = loadOverrides(w.layout.overrides);
+  const email = 'taro.suzuki@example.jp'; // shop-alpha (opt-in source) says denied in the newest export
+  const grant: Overrides = { ...base, consents: [{ email, source: 'shop-alpha', status: 'granted', note: 'granted by phone' }] };
+  await run(w, { overrides: grant });
+  assert.equal(consentOf(w.db, email, 'shop-alpha')?.status, 'granted');
+  assert.equal(inView(w.db, 'v_sendable_strict', email), true);
+
+  await run(w, { overrides: base });
+  const k = consentOf(w.db, email, 'shop-alpha');
+  assert.equal(k?.status, 'denied');
+  assert.equal(JSON.parse(String(k?.evidence)).file, 'members_2025-09-01.csv');
+  assert.equal(inView(w.db, 'v_sendable_strict', email), false);
+  assert.equal(inView(w.db, 'v_not_blocked', email), false);
+  w.db.close();
+});
+
+/** Workspace with two small UTF-8 sources; `hi` is newer, so it has the higher priority (D8). */
+function twoSourceWorkspace(hiRows: string[], loRows: string[]): Ws {
+  const ws = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 't7-two-')), 'ws');
+  const layout = workspaceLayout(ws);
+  for (const d of layoutDirs(layout)) fs.mkdirSync(d, { recursive: true });
+  const write = (name: string, date: string, rows: string[]) => {
+    const dir = path.join(layout.resources, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `list_${date}.csv`), ['Email,Name,Locale,Newsletter', ...rows].join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, 'meta.md'), `---\nsource: ${name}\nkind: other\nfiles:\n  - name: list_${date}.csv\n    encoding: utf-8\nconsent_basis: unknown\nexported_at: ${date}\n---\n`);
+  };
+  write('src-hi', '2025-06-01', hiRows);
+  write('src-lo', '2024-06-01', loRows);
+  const db = openDb(layout.dbPath);
+  migrate(db, path.join(repo, 'schema', 'migrations'));
+  return { layout, db };
+}
+
+test('name/locale follow the surviving source when the address leaves its higher-priority source', async () => {
+  const w = twoSourceWorkspace(['mika@example.org,Mika Hi,ja,', 'other@example.org,Other,en,'], ['mika@example.org,Mika Lo,en-US,']);
+  const { stats } = await run(w);
+  assert.deepEqual(stats.priority_order, ['src-hi', 'src-lo']);
+  const before = get(w.db, 'SELECT id, name, locale FROM contacts WHERE email = ?', 'mika@example.org');
+  assert.deepEqual([before?.name, before?.locale], ['Mika Hi', 'ja']);
+
+  const hi = path.join(w.layout.resources, 'src-hi', 'list_2025-06-01.csv');
+  fs.writeFileSync(hi, 'Email,Name,Locale,Newsletter\nother@example.org,Other,en,\n');
+  await run(w);
+  const after = get(w.db, 'SELECT id, name, locale, orphaned_at FROM contacts WHERE email = ?', 'mika@example.org');
+  assert.deepEqual([after?.id, after?.name, after?.locale, after?.orphaned_at], [before?.id, 'Mika Lo', 'en-US', null]);
+  assert.deepEqual(all(w.db, `SELECT cs.source FROM contact_sources cs JOIN contacts c ON c.id = cs.contact_id WHERE c.email = 'mika@example.org'`).map((r) => r.source), ['src-lo']);
+  w.db.close();
+});
+
+test('a source gone from resources/ keeps its rows with a warning; consent overrides for it are ignored', async () => {
   const w = fixtureWorkspace();
   await run(w);
-  const before = snapshot(w.db);
-  const { stats } = await run(w, { sources: ['shop-alpha'] });
-  assert.deepEqual(snapshot(w.db).contact_sources, before.contact_sources);
-  assert.deepEqual(snapshot(w.db).contacts, before.contacts);
-  assert.equal(stats.contacts_total, expected.contacts_total);
-  assert.deepEqual(stats.overlap, expected.overlap);
-
   fs.rmSync(path.join(w.layout.resources, 'event-beta'), { recursive: true });
-  const { warnings, stats: s2 } = await run(w);
+  const overrides: Overrides = { ...loadOverrides(w.layout.overrides), consents: [{ email: 'taro.suzuki@example.jp', source: 'event-beta', status: 'granted' }] };
+  const { warnings, stats } = await run(w, { overrides });
   assert.ok(warnings.some((m) => m.includes('"event-beta" is in the database but no longer in resources/')));
-  assert.equal(Number(get(w.db, "SELECT COUNT(*) AS n FROM contact_sources WHERE source = 'event-beta'")?.n) > 0, true);
-  assert.equal(s2.contacts_orphaned, 0);
+  assert.ok(warnings.some((m) => m.includes('source "event-beta" is not merged') && m.includes('t***@e***e.jp')));
+  assert.equal(stats.overrides_applied.consents, 0);
+  assert.ok(Number(get(w.db, "SELECT COUNT(*) AS n FROM contact_sources WHERE source = 'event-beta'")?.n) > 0);
+  assert.equal(consentOf(w.db, 'taro.suzuki@example.jp', 'event-beta')?.status, 'unknown');
+  assert.equal(stats.contacts_orphaned, 0);
   w.db.close();
+});
+
+test('a 150 000-row group for one address merges (no argument spreads over rows); denied in the newest file wins', async () => {
+  const ws = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 't7-big-')), 'ws');
+  const layout = workspaceLayout(ws);
+  for (const d of layoutDirs(layout)) fs.mkdirSync(d, { recursive: true });
+  const dir = path.join(layout.resources, 'big');
+  fs.mkdirSync(dir, { recursive: true });
+  const N = 150_000;
+  const lines = ['Email,Name,Newsletter'];
+  for (let i = 0; i < N - 1; i++) lines.push('bulk@example.com,Bulk,yes');
+  lines.push('bulk@example.com,Bulk,no');
+  fs.writeFileSync(path.join(dir, 'big_2025-01-01.csv'), lines.join('\n') + '\n');
+  fs.writeFileSync(path.join(dir, 'meta.md'), '---\nsource: big\nkind: other\nfiles:\n  - name: big_2025-01-01.csv\n    encoding: utf-8\n---\n');
+  const db = openDb(layout.dbPath);
+  migrate(db, path.join(repo, 'schema', 'migrations'));
+  const w: Ws = { layout, db };
+  const { stats } = await run(w);
+  assert.equal(stats.contacts_total, 1);
+  const cs = get(db, 'SELECT occurrences FROM contact_sources');
+  assert.equal(cs?.occurrences, N);
+  const k = consentOf(db, 'bulk@example.com', 'big');
+  assert.equal(k?.status, 'denied');
+  assert.equal(JSON.parse(String(k?.evidence)).row_number, N);
+  db.close();
 });
 
 test('merge failure rolls back the whole transaction', async () => {

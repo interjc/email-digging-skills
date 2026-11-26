@@ -1,5 +1,8 @@
-// Merge staged sources into the main SQLite database (D3, D8, D14, D15, D22, D23).
+// Merge staged sources into the main SQLite database (D3, D8, D14, D15, D22, D23, D30).
 // One transaction per call; the caller makes the backup first (backupDb) and creates the runs row.
+// D30: a real merge always gets every source with a meta.md, so contact fields, contact_sources and
+// consents are a full recompute from the current inputs. Sources whose directory (or meta.md) is gone
+// keep their contact_sources / consents rows unchanged (D23) and do not contribute contact fields.
 // Nothing is ever deleted from contacts or suppressions.
 
 import fs from 'node:fs';
@@ -116,6 +119,11 @@ export function finishRun(db: DatabaseSync, runId: string, status: 'ok' | 'faile
   db.prepare('UPDATE runs SET status = ?, finished_at = ?, report_path = ? WHERE id = ?').run(status, finishedAt, reportPath, runId);
 }
 
+/** Record the report of a run (set after the report files were written). */
+export function setRunReportPath(db: DatabaseSync, runId: string, reportPath: string): void {
+  db.prepare('UPDATE runs SET report_path = ? WHERE id = ?').run(reportPath, runId);
+}
+
 /** `base`, or `base-1`, `base-2` ... when a run with that id already exists. */
 export function uniqueRunId(db: DatabaseSync, base: string): string {
   const exists = db.prepare('SELECT 1 AS x FROM runs WHERE id = ?');
@@ -140,9 +148,8 @@ export interface MergeOptions {
   /** Put into MergeStats.backup_path (the caller made the backup). */
   backupPath?: string | null;
   /**
-   * Source directory names currently under resources/ (with or without meta.md). A source in the
-   * database that is neither processed nor listed here gets a warning (its rows are kept, D23).
-   * Default: the processed sources.
+   * Source directory names currently under resources/ (with or without meta.md). Used only for the
+   * wording of the warning about database sources that are not merged (their rows are kept, D23).
    */
   resourceSources?: string[];
   /** Receives warnings for the report (already masked). */
@@ -307,11 +314,12 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     if (!order.includes(name)) warn(`config.yaml sources.priority lists "${name}", which is not a known source`);
   }
   const prio = new Map(order.map((n, i) => [n, i + 1]));
-  const resources = new Set(opts.resourceSources ?? [...processed]);
+  const resources = new Set(opts.resourceSources ?? []);
   for (const name of dbSources.keys()) {
-    if (!processed.has(name) && !resources.has(name)) {
-      warn(`source "${name}" is in the database but no longer in resources/; its rows are kept`);
-    }
+    if (processed.has(name)) continue;
+    warn(resources.has(name)
+      ? `source "${name}" is in the database but resources/${name}/ has no meta.md any more; its rows are kept`
+      : `source "${name}" is in the database but no longer in resources/; its rows are kept`);
   }
 
   const upsertSource = db.prepare(`
@@ -350,16 +358,6 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     (db.prepare('SELECT id, email, email_domain, name, locale, email_status, suggested_email, flags, first_seen_at, orphaned_at FROM contacts').all() as unknown as ContactRow[])
       .map((c) => [c.email, { ...c, id: Number(c.id) }]),
   );
-  // Sources of each contact that this run does not replace (not processed): they keep contributing
-  // through the values already stored on the contact (the schema keeps no per-source name/flags).
-  const otherSources = new Map<number, string[]>();
-  for (const r of db.prepare('SELECT contact_id, source FROM contact_sources').all() as Array<{ contact_id: number; source: string }>) {
-    if (processed.has(r.source)) continue;
-    const id = Number(r.contact_id);
-    const list = otherSources.get(id) ?? [];
-    list.push(r.source);
-    otherSources.set(id, list);
-  }
 
   const insertContact = db.prepare(`
     INSERT INTO contacts (email, email_domain, name, locale, email_status, suggested_email, flags, first_seen_at, orphaned_at, created_at, updated_at)
@@ -374,7 +372,6 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
   for (const email of emails) {
     const perSource = byEmail.get(email) as Map<string, StagedRecord[]>;
     const old = existing.get(email);
-    const others = old ? (otherSources.get(old.id) ?? []) : [];
 
     interface Candidate { prio: number; name: string | null; locale: string | null; suggestion: string | null }
     const candidates: Candidate[] = [];
@@ -392,12 +389,6 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
       });
       for (const r of rows) for (const f of r.flags) flagSet.add(f);
       domain = rep.email_domain;
-    }
-    if (old && others.length > 0) {
-      for (const source of others) {
-        candidates.push({ prio: prio.get(source) ?? Number.MAX_SAFE_INTEGER, name: old.name, locale: old.locale, suggestion: old.suggested_email });
-      }
-      for (const f of JSON.parse(old.flags) as string[]) flagSet.add(f);
     }
     candidates.sort((a, b) => a.prio - b.prio);
     const name = candidates.find((c) => !isEmpty(c.name))?.name ?? null;
@@ -459,7 +450,8 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
         continue;
       }
       // D15: the newest file decides; inside that file `denied` wins; then the first row.
-      const newest = Math.max(...decisive.map((r) => rank(src, r.file)));
+      let newest = -Infinity;
+      for (const r of decisive) newest = Math.max(newest, rank(src, r.file));
       const inFile = decisive
         .filter((r) => rank(src, r.file) === newest)
         .sort((a, b) => a.row_number - b.row_number || a.split_index - b.split_index);
@@ -484,6 +476,10 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
   const hasCs = db.prepare('SELECT 1 AS x FROM contact_sources WHERE contact_id = ? AND source = ?');
   let consentsApplied = 0;
   for (const o of consentOverrides) {
+    if (!processed.has(o.source)) {
+      warn(`consents.yaml: source "${o.source}" is not merged (no directory with meta.md); override for ${maskEmail(o.email)} ignored`);
+      continue;
+    }
     const row = findContact.get(o.email) as { id: number } | undefined;
     const id = row ? Number(row.id) : null;
     if (id === null || hasCs.get(id, o.source) === undefined) {
@@ -526,26 +522,30 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     (s) => warn(`suppressions.yaml: several entries for ${maskEmail(s.email)} (${s.reason}); the last one is used`),
   );
   const insSup = db.prepare("INSERT OR IGNORE INTO suppressions (email, reason, source, note, created_at) VALUES (?, ?, 'override', ?, ?)");
-  for (const s of suppressions) insSup.run(s.email, s.reason, s.note ?? null, now);
+  let suppressionsInserted = 0;
+  for (const s of suppressions) suppressionsInserted += Number(insSup.run(s.email, s.reason, s.note ?? null, now).changes);
 
-  // typo decisions are applied during staging; count the ones that took effect in this run's rows.
+  // Typo decisions are applied during staging. Count the original addresses they actually changed:
+  // accepted = staged rows carrying typo_accepted (the original is the normalized raw value),
+  // rejected = the suspect address is present and kept as it is.
   const typoDecisions = dedupeLast(
     opts.overrides.typo.map((t) => ({ ...t, email: normalizeOverrideEmail(t.email) })),
     (t) => t.email,
     (t) => warn(`typo-decisions.yaml: several entries for ${maskEmail(t.email)}; the last one is used`),
   );
+  const acceptedOriginals = new Set<string>();
+  for (const s of staged) {
+    for (const r of s.rows) {
+      if (!r.flags.includes('typo_accepted')) continue;
+      const original = normalizeEmailCell(r.raw_email)[0]?.email;
+      if (original) acceptedOriginals.add(original);
+    }
+  }
   let typoApplied = 0;
   for (const t of typoDecisions) {
-    let hit = false;
-    if (t.action === 'accept') {
-      const target = t.suggested !== undefined ? normalizeOverrideEmail(t.suggested) : (normalizeEmailCell(t.email)[0]?.suggestion ?? null);
-      const perSource = target === null ? undefined : byEmail.get(target);
-      hit = perSource !== undefined && [...perSource.values()].some((rows) => rows.some((r) => r.flags.includes('typo_accepted')));
-    } else {
-      hit = byEmail.has(t.email);
-    }
+    const hit = t.action === 'accept' ? acceptedOriginals.has(t.email) : byEmail.has(t.email);
     if (hit) typoApplied++;
-    else warn(`typo-decisions.yaml: ${maskEmail(t.email)} (${t.action}) matched no address in the sources processed by this run`);
+    else warn(`typo-decisions.yaml: ${maskEmail(t.email)} (${t.action}) matched no address in the merged sources`);
   }
 
   // 8. stats --------------------------------------------------------------------------------------
@@ -565,6 +565,6 @@ function mergeInTransaction(staged: StagedSource[], opts: MergeOptions): MergeSt
     contacts_orphaned: Number(orphaned.changes),
     cross_source_dups: one('SELECT COUNT(*) AS n FROM (SELECT contact_id FROM contact_sources GROUP BY contact_id HAVING COUNT(DISTINCT source) >= 2)'),
     overlap,
-    overrides_applied: { typo: typoApplied, suppressions: suppressions.length, consents: consentsApplied, exclude: excluded },
+    overrides_applied: { typo: typoApplied, suppressions: suppressionsInserted, consents: consentsApplied, exclude: excluded },
   };
 }

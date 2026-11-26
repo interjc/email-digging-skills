@@ -2,6 +2,7 @@
 // Masked only: samples go through maskEmail, and every string is passed through the address
 // sanitizer before it is written (D28), so a header or an error message cannot leak an address.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ColumnMapping, MergeStats, ResolvedEncoding, RunReport, SourceMeta, SourceStageResult } from './types.ts';
@@ -153,6 +154,12 @@ function cell(v: unknown): string {
   return String(v ?? '').replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
 }
 
+/** Append every item (a loop: no argument spread, whatever the length). */
+function pushAll(out: string[], items: string[], ...more: string[]): void {
+  for (const i of items) out.push(i);
+  for (const m of more) out.push(m);
+}
+
 function table(header: string[], rows: unknown[][]): string[] {
   return [`| ${header.map(cell).join(' | ')} |`, `|${header.map(() => '---').join('|')}|`, ...rows.map((r) => `| ${r.map(cell).join(' | ')} |`)];
 }
@@ -172,7 +179,8 @@ export function renderMarkdown(r: FullRunReport): string {
   L.push('');
 
   if (r.errors.length > 0) {
-    L.push('## Errors', '', ...r.errors.map((e) => `- ${cell(e)}`), '');
+    L.push('## Errors', '');
+    pushAll(L, r.errors.map((e) => `- ${cell(e)}`), '');
   }
 
   L.push('## Files', '');
@@ -183,10 +191,10 @@ export function renderMarkdown(r: FullRunReport): string {
       fileRows.push([s.source, f.file, f.rows_read, f.empty, f.invalid, f.cells_split, f.dup_in_file, f.role, f.typo_suspect, enc, f.mappings.map(mappingText).join('; ')]);
     }
   }
-  L.push(...table(['source', 'file', 'rows_read', 'empty', 'invalid', 'cells_split', 'dup_in_file', 'role', 'typo_suspect', 'encoding', 'mappings'], fileRows), '');
+  pushAll(L, table(['source', 'file', 'rows_read', 'empty', 'invalid', 'cells_split', 'dup_in_file', 'role', 'typo_suspect', 'encoding', 'mappings'], fileRows), '');
 
   L.push('## Totals', '');
-  L.push(...table(['source', 'staged rows', 'rejected rows', 'unique addresses'], r.stage.map((s) => [s.source, s.staged_rows, s.rejected_rows, s.unique_emails])), '');
+  pushAll(L, table(['source', 'staged rows', 'rejected rows', 'unique addresses'], r.stage.map((s) => [s.source, s.staged_rows, s.rejected_rows, s.unique_emails])), '');
   if (r.merge) {
     const m = r.merge;
     L.push(`- Unique contacts (not orphaned): ${m.contacts_total}`);
@@ -209,10 +217,11 @@ export function renderMarkdown(r: FullRunReport): string {
     }
     const own = new Map(r.stage.map((s) => [s.source, s.unique_emails]));
     L.push('## Source overlap', '', 'Contacts shared by each pair of sources (diagonal: addresses staged for the source in this run).', '');
-    L.push(...table(['', ...names], names.map((a) => [a, ...names.map((b) => (a === b ? (own.get(a) ?? '—') : (pair.get(`${a}|${b}`) ?? 0)))])), '');
+    pushAll(L, table(['', ...names], names.map((a) => [a, ...names.map((b) => (a === b ? (own.get(a) ?? '—') : (pair.get(`${a}|${b}`) ?? 0)))])), '');
   }
 
-  L.push('## Priority order used', '', ...(names.length > 0 ? names.map((n, i) => `${i + 1}. ${n}`) : ['—']), '');
+  L.push('## Priority order used', '');
+  pushAll(L, names.length > 0 ? names.map((n, i) => `${i + 1}. ${n}`) : ['—'], '');
 
   if (r.merge) {
     const o = r.merge.overrides_applied;
@@ -223,36 +232,70 @@ export function renderMarkdown(r: FullRunReport): string {
     L.push(`- Consent overrides (consents.yaml): ${o.consents}`, '');
   }
 
-  L.push('## Warnings', '', ...(r.warnings.length > 0 ? r.warnings.map((w) => `- ${cell(w)}`) : ['None.']), '');
+  L.push('## Warnings', '');
+  pushAll(L, r.warnings.length > 0 ? r.warnings.map((w) => `- ${cell(w)}`) : ['None.'], '');
 
   L.push(`## Samples (masked, at most ${SAMPLE_LIMIT} each)`, '');
   L.push('### Rejected rows', '');
-  if (r.samples.invalid.length > 0) L.push(...table(['source', 'file', 'row', 'value', 'reason'], r.samples.invalid.map((s) => [s.source, s.file, s.row_number, s.masked, s.reason])));
+  if (r.samples.invalid.length > 0) pushAll(L, table(['source', 'file', 'row', 'value', 'reason'], r.samples.invalid.map((s) => [s.source, s.file, s.row_number, s.masked, s.reason])));
   else L.push('None.');
   L.push('', '### Typo suspects', '');
-  if (r.samples.typo.length > 0) L.push(...table(['address', 'suggestion', 'sources'], r.samples.typo.map((t) => [t.masked, t.masked_suggestion, t.sources.join(', ')])));
+  if (r.samples.typo.length > 0) pushAll(L, table(['address', 'suggestion', 'sources'], r.samples.typo.map((t) => [t.masked, t.masked_suggestion, t.sources.join(', ')])));
   else L.push('None.');
   L.push('', `### Column mappings below ${REVIEW_THRESHOLD}`, '');
   if (r.samples.low_confidence_mappings.length > 0) {
-    L.push(...table(['source', 'file', 'field', 'column', 'how', 'confidence'], r.samples.low_confidence_mappings.map((x) => [x.source, x.file, x.mapping.field, x.mapping.column, x.mapping.how, x.mapping.confidence])));
+    pushAll(L, table(['source', 'file', 'field', 'column', 'how', 'confidence'], r.samples.low_confidence_mappings.map((x) => [x.source, x.file, x.mapping.field, x.mapping.column, x.mapping.how, x.mapping.confidence])));
   } else L.push('None.');
   L.push('', '### Encodings detected automatically (`encoding: auto`)', '');
   if (r.samples.auto_encodings.length > 0) {
-    L.push(...table(['source', 'file', 'encoding', 'candidates'], r.samples.auto_encodings.map((x) => [x.source, x.file, x.encoding ?? 'n/a', x.candidates.join(', ')])));
+    pushAll(L, table(['source', 'file', 'encoding', 'candidates'], r.samples.auto_encodings.map((x) => [x.source, x.file, x.encoding ?? 'n/a', x.candidates.join(', ')])));
   } else L.push('None.');
   L.push('', 'Next: run `review-report` to list the decisions to make.', '');
   return sanitizeText(L.join('\n'));
 }
 
-/** Write `<run_id>.json` and `<run_id>.md`, and copy them to `latest.json` / `latest.md`. */
-export function writeReport(report: FullRunReport, reportsDir: string): { json: string; md: string } {
-  fs.mkdirSync(reportsDir, { recursive: true });
+/**
+ * Write `<dir>/<name>` atomically: a new temp file in the same directory (`wx`, mode 0600) renamed over
+ * the target, so a symlink at the target is replaced, never followed. With `workspace`, the directory's
+ * realpath must lie inside the workspace's realpath (it must already exist), else nothing is written.
+ * Returns the path written.
+ */
+export function writeFileAtomic(dir: string, name: string, content: string, workspace?: string): string {
+  if (name !== path.basename(name) || name === '' || name === '.' || name === '..') throw new Error(`invalid file name: ${name}`);
+  let realDir: string;
+  if (workspace !== undefined) {
+    realDir = fs.realpathSync(dir);
+    const realWs = fs.realpathSync(workspace);
+    const rel = path.relative(realWs, realDir);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error(`refusing to write ${name}: ${dir} resolves to ${realDir}, which is outside the workspace ${realWs}`);
+    }
+  } else {
+    fs.mkdirSync(dir, { recursive: true });
+    realDir = fs.realpathSync(dir);
+  }
+  const tmp = path.join(realDir, `.${name}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  fs.writeFileSync(tmp, content, { flag: 'wx', mode: 0o600 });
+  try {
+    fs.renameSync(tmp, path.join(realDir, name));
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  return path.join(dir, name);
+}
+
+/**
+ * Write `<run_id>.json` and `<run_id>.md`, plus `latest.json` / `latest.md` with the same content, each
+ * atomically (writeFileAtomic). Pass `workspace` to refuse a reports directory that resolves outside it.
+ */
+export function writeReport(report: FullRunReport, reportsDir: string, workspace?: string): { json: string; md: string } {
   const safe = sanitizeDeep(report);
-  const json = path.join(reportsDir, `${safe.run_id}.json`);
-  const md = path.join(reportsDir, `${safe.run_id}.md`);
-  fs.writeFileSync(json, `${JSON.stringify(safe, null, 2)}\n`);
-  fs.writeFileSync(md, renderMarkdown(safe));
-  fs.copyFileSync(json, path.join(reportsDir, 'latest.json'));
-  fs.copyFileSync(md, path.join(reportsDir, 'latest.md'));
+  const jsonText = `${JSON.stringify(safe, null, 2)}\n`;
+  const mdText = renderMarkdown(safe);
+  const json = writeFileAtomic(reportsDir, `${safe.run_id}.json`, jsonText, workspace);
+  const md = writeFileAtomic(reportsDir, `${safe.run_id}.md`, mdText, workspace);
+  writeFileAtomic(reportsDir, 'latest.json', jsonText, workspace);
+  writeFileAtomic(reportsDir, 'latest.md', mdText, workspace);
   return { json, md };
 }

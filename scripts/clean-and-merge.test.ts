@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { cleanAndMerge, renderSummary } from './clean-and-merge.ts';
+import { cleanAndMerge, renderSummary, SOURCE_NEEDS_DRY_RUN } from './clean-and-merge.ts';
 import { openDb, migrate } from './lib/db.ts';
 import { layoutDirs, workspaceLayout } from './lib/paths.ts';
 import type { WorkspaceLayout } from './lib/paths.ts';
@@ -30,14 +30,14 @@ function setup(): { ws: string; layout: WorkspaceLayout; root: string } {
 }
 
 function unmaskedAddresses(text: string): string[] {
-  const re = /[^\s@＠<>"'`()[\]{}:,;|]+[@＠][^\s@＠<>"'`()[\]{}:,;|]+/gu;
+  const re = /[^\s@＠﹫<>"'`()[\]{}:,;|]+[@＠﹫][^\s@＠﹫<>"'`()[\]{}:,;|]+/gu;
   return (text.match(re) ?? []).filter((m) => !m.includes('*'));
 }
 
 function query(layout: WorkspaceLayout, sql: string): Array<Record<string, unknown>> {
   const db = openDb(layout.dbPath, { readonly: true });
   try {
-    return db.prepare(sql).all() as Array<Record<string, unknown>>;
+    return (db.prepare(sql).all() as Array<Record<string, unknown>>).map((r) => ({ ...r }));
   } finally {
     db.close();
   }
@@ -88,14 +88,75 @@ test('clean-and-merge --dry-run: report only, no backup, database untouched', as
   assert.deepEqual(fs.readdirSync(layout.backups), []);
 });
 
-test('clean-and-merge --source: only that source; unknown or meta-less sources are errors', async () => {
+test('clean-and-merge --source: only with --dry-run (D30); unknown or meta-less sources are errors', async () => {
   const { ws, layout, root } = setup();
   fs.mkdirSync(path.join(layout.resources, 'new-source'));
-  const r = await cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['cn-delta'] });
-  assert.deepEqual(r.report.merge?.sources, ['cn-delta']);
-  assert.deepEqual(query(layout, 'SELECT DISTINCT source FROM contact_sources').map((x) => x.source), ['cn-delta']);
-  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['nope'] }), /unknown source "nope"/);
-  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['new-source'] }), /no meta\.md \(run add-source new-source\)/);
+  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['cn-delta'] }), new RegExp(SOURCE_NEEDS_DRY_RUN.slice(0, 40).replace(/[-]/g, '\\-')));
+  assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM runs')[0]?.n, 0);
+  assert.deepEqual(fs.readdirSync(layout.staging), [], 'nothing staged');
+
+  const r = await cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['cn-delta'], dryRun: true });
+  assert.equal(r.status, 'dry-run');
+  assert.deepEqual(r.report.stage.map((s) => s.source), ['cn-delta']);
+  assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM contacts')[0]?.n, 0);
+  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['nope'], dryRun: true }), /unknown source "nope"/);
+  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root, sources: ['new-source'], dryRun: true }), /no meta\.md \(run add-source new-source\)/);
+});
+
+/** Make output/reports a symlink to a directory outside the workspace, so writing reports fails. */
+function breakReports(layout: WorkspaceLayout): string {
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 't7-cm-out-'));
+  fs.rmSync(layout.reports, { recursive: true, force: true });
+  fs.symlinkSync(outside, layout.reports);
+  return outside;
+}
+
+/** A trigger that makes the merge fail inside its transaction, after earlier writes. */
+function breakMerge(layout: WorkspaceLayout): void {
+  const db = openDb(layout.dbPath);
+  db.exec("CREATE TRIGGER t7_fail BEFORE INSERT ON contact_sources BEGIN SELECT RAISE(ABORT, 'forced failure'); END");
+  db.close();
+}
+
+test('clean-and-merge: a report failure after commit → run ok, report_path null, clear exit-1 message', async () => {
+  const { ws, layout, root } = setup();
+  const outside = breakReports(layout);
+  await assert.rejects(
+    cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T12:00:00Z') }),
+    /^Error: merge committed \(run 20261126T120000Z\); report could not be written: .*outside the workspace.*; run review-report after fixing$/,
+  );
+  assert.deepEqual(query(layout, 'SELECT id, status, report_path FROM runs'), [{ id: '20261126T120000Z', status: 'ok', report_path: null }]);
+  assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM contacts')[0]?.n, expected.contacts_total);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.ok(!fs.existsSync(path.join(ws, '.lock')));
+});
+
+test('clean-and-merge: a merge failure rolls back, marks the run failed and writes the failure report', async () => {
+  const { ws, layout, root } = setup();
+  breakMerge(layout);
+  const r = await cleanAndMerge({ workspace: ws, repoRoot: root, now: new Date('2026-11-26T12:00:00Z') });
+  assert.equal(r.status, 'failed');
+  assert.ok(r.report.errors.some((e) => e.includes('merge failed and was rolled back') && e.includes('forced failure')));
+  assert.deepEqual(query(layout, 'SELECT status, report_path FROM runs'), [{ status: 'failed', report_path: r.paths.md }]);
+  assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM contacts')[0]?.n, 0);
+  assert.equal(query(layout, 'SELECT COUNT(*) AS n FROM sources')[0]?.n, 0);
+});
+
+test('clean-and-merge: when the failure report cannot be written either, the run is still marked failed', async () => {
+  const { ws, layout, root } = setup();
+  breakMerge(layout);
+  breakReports(layout);
+  await assert.rejects(cleanAndMerge({ workspace: ws, repoRoot: root }), /merge failed and was rolled back \(run .*\): forced failure; the failure report could not be written either/);
+  assert.deepEqual(query(layout, 'SELECT status, report_path FROM runs'), [{ status: 'failed', report_path: null }]);
+});
+
+test('clean-and-merge: runs in the same second get distinct millisecond timestamps', async () => {
+  const { ws, layout, root } = setup();
+  const now = new Date('2026-11-26T10:00:00Z');
+  await cleanAndMerge({ workspace: ws, repoRoot: root, now });
+  const r2 = await cleanAndMerge({ workspace: ws, repoRoot: root, now });
+  assert.equal(r2.report.merged_at, '2026-11-26T10:00:00.001Z');
+  assert.deepEqual(query(layout, 'SELECT started_at FROM runs ORDER BY id').map((x) => x.started_at), ['2026-11-26T10:00:00.000Z', '2026-11-26T10:00:00.001Z']);
 });
 
 test('clean-and-merge: an invalid meta.md stops the run before staging; the database is untouched', async () => {
@@ -144,6 +205,10 @@ test('clean-and-merge CLI: masked stdout, exit 0; --json; exit 2 for an uninitia
   assert.equal(out.status, 'dry-run');
   assert.equal(out.merge, null);
   assert.deepEqual(unmaskedAddresses(j.stdout), []);
+
+  const src = spawnSync('node', ['scripts/clean-and-merge.ts', '--workspace', ws, '--source', 'cn-delta'], { cwd: repo, encoding: 'utf8' });
+  assert.equal(src.status, 1);
+  assert.ok(src.stderr.includes(SOURCE_NEEDS_DRY_RUN), src.stderr);
 
   const empty = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 't7-cm-empty-')), 'ws');
   const e = spawnSync('node', ['scripts/clean-and-merge.ts', '--workspace', empty], { cwd: repo, encoding: 'utf8' });

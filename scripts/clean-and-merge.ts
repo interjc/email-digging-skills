@@ -2,12 +2,14 @@
 // Read every source with a meta.md, stage it (clean, normalize, apply overrides), merge it into the
 // main SQLite database and write the masked run report. Runs under the workspace lock (D26).
 // Order: load all metas (any error → exit 1, nothing staged) → stage → [--dry-run: report, stop]
-// → backup → runs row → merge (one transaction) → report → runs status.
+// → backup → runs row → merge (one transaction, committed) → run marked ok → reports → report_path.
+// D30: a merge always processes every source with a meta.md; --source is allowed only with --dry-run.
 // stdout is masked: everything printed goes through sanitizeText (D28).
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { DatabaseSync } from 'node:sqlite';
 import type { MergeStats, SourceMeta, SourceStageResult } from './lib/types.ts';
 import { EXIT } from './lib/types.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
@@ -19,7 +21,7 @@ import { loadOverrides } from './lib/overrides.ts';
 import { loadMeta } from './lib/meta.ts';
 import { stageSource } from './lib/stage.ts';
 import { backupDb, backupStamp, migrate, openDb } from './lib/db.ts';
-import { finishRun, mergeStaged, startRun, uniqueRunId } from './lib/merge.ts';
+import { finishRun, mergeStaged, setRunReportPath, startRun, uniqueRunId } from './lib/merge.ts';
 import { resolvePriority } from './lib/priority.ts';
 import { buildReport, writeReport } from './lib/report.ts';
 import type { FullRunReport, RunStatus } from './lib/report.ts';
@@ -30,7 +32,7 @@ const MIGRATIONS = path.join(import.meta.dirname, '..', 'schema', 'migrations');
 
 export interface CleanAndMergeOptions {
   workspace?: string | null;
-  /** Only these sources (default: every directory with a meta.md). */
+  /** Only these sources (default: every directory with a meta.md). Requires dryRun (D30). */
   sources?: string[];
   dryRun?: boolean;
   /** Repository root for config.yaml and the workspace guard. Default: this repository. */
@@ -59,7 +61,10 @@ function freeReportId(reportsDir: string, base: string): string {
   return id;
 }
 
+export const SOURCE_NEEDS_DRY_RUN = '--source is only allowed together with --dry-run: a merge always processes every source with a meta.md (D30)';
+
 export async function cleanAndMerge(opts: CleanAndMergeOptions = {}): Promise<CleanAndMergeResult> {
+  if (opts.sources && opts.sources.length > 0 && !opts.dryRun) throw new Error(SOURCE_NEEDS_DRY_RUN);
   const root = opts.repoRoot ?? repoRoot();
   const info = requireWorkspace({ workspace: opts.workspace, repoRoot: root });
   return withWorkspaceLock(info.workspace, 'clean-and-merge', () => runLocked(info, root, opts));
@@ -118,23 +123,24 @@ async function runLocked(info: WorkspaceInfo, root: string, opts: CleanAndMergeO
   }
 
   const now = opts.now ?? new Date();
-  const nowIso = now.toISOString();
   const stamp = backupStamp(now);
-  const common = { generatedAt: nowIso, sourcesWithoutMeta: withoutMeta, warnings, metas };
-
-  const finish = async (status: RunStatus, runId: string, merge: MergeStats | null, extra: { errors?: string[]; priorityOrder?: string[]; mergedAt?: string | null; backup?: string | null }) => {
-    const report = await buildReport(results, merge, { ...common, runId, status, errors: extra.errors ?? [], priorityOrder: extra.priorityOrder, mergedAt: extra.mergedAt ?? null });
-    const paths = writeReport(report, layout.reports);
-    return { status, run_id: runId, report, paths, backup_path: extra.backup ?? null, workspace_warnings: info.warnings };
-  };
+  const common = { sourcesWithoutMeta: withoutMeta, warnings, metas };
+  const report = (runId: string, generatedAt: string, status: RunStatus, merge: MergeStats | null, extra: { errors?: string[]; priorityOrder?: string[]; mergedAt?: string | null } = {}) =>
+    buildReport(results, merge, { ...common, runId, generatedAt, status, errors: extra.errors ?? [], priorityOrder: extra.priorityOrder, mergedAt: extra.mergedAt ?? null });
+  const result = (status: RunStatus, rep: FullRunReport, paths: { json: string; md: string }, backup: string | null): CleanAndMergeResult =>
+    ({ status, run_id: rep.run_id, report: rep, paths, backup_path: backup, workspace_warnings: info.warnings });
 
   if (errors.length > 0) {
     errors.push('the database was not changed');
-    return finish('failed', freeReportId(layout.reports, stamp), null, { errors });
+    const rep = await report(freeReportId(layout.reports, stamp), now.toISOString(), 'failed', null, { errors });
+    return result('failed', rep, writeReport(rep, layout.reports, info.workspace), null);
   }
 
   if (opts.dryRun) {
-    return finish('dry-run', freeReportId(layout.reports, `${stamp}-dry-run`), null, { priorityOrder: dryRunPriority(layout.dbPath, metas, config.sources.priority) });
+    const rep = await report(freeReportId(layout.reports, `${stamp}-dry-run`), now.toISOString(), 'dry-run', null, {
+      priorityOrder: dryRunPriority(layout.dbPath, metas, config.sources.priority),
+    });
+    return result('dry-run', rep, writeReport(rep, layout.reports, info.workspace), null);
   }
 
   const backup = backupDb(layout.dbPath, layout.backups, config.backups.keep, now);
@@ -142,26 +148,54 @@ async function runLocked(info: WorkspaceInfo, root: string, opts: CleanAndMergeO
   try {
     migrate(db, MIGRATIONS);
     const runId = uniqueRunId(db, freeReportId(layout.reports, stamp));
+    // The run's own timestamp is unique (strictly after every earlier run), so orphaned_at /
+    // updated_at written by this merge identify this run exactly (review-report relies on it).
+    const nowIso = uniqueRunTime(db, now);
     startRun(db, runId, 'clean-and-merge', nowIso);
+
     let stats: MergeStats;
     try {
       stats = await mergeStaged(results, {
         db, config, metas, overrides, runId, now: nowIso, backupPath: backup, resourceSources: dirs, onWarning,
       });
     } catch (err) {
-      const res = await finish('failed', runId, null, {
-        errors: [`merge failed and was rolled back: ${errMessage(err)}`, backup ? `backup of the database before this run: ${backup}` : 'no backup (the database did not exist)'],
-        backup,
-      });
-      finishRun(db, runId, 'failed', new Date().toISOString(), res.paths.md);
-      return res;
+      // Mark the run failed first: a failure while writing the report must not prevent that.
+      finishRun(db, runId, 'failed', new Date().toISOString(), null);
+      const reason = errMessage(err);
+      const errs = [`merge failed and was rolled back: ${reason}`, backup ? `backup of the database before this run: ${backup}` : 'no backup (the database did not exist)'];
+      let paths: { json: string; md: string };
+      let rep: FullRunReport;
+      try {
+        rep = await report(runId, nowIso, 'failed', null, { errors: errs });
+        paths = writeReport(rep, layout.reports, info.workspace);
+        setRunReportPath(db, runId, paths.md);
+      } catch (reportErr) {
+        throw new Error(`merge failed and was rolled back (run ${runId}): ${reason}; the failure report could not be written either: ${errMessage(reportErr)}`);
+      }
+      return result('failed', rep, paths, backup);
     }
-    const res = await finish('ok', runId, stats, { mergedAt: nowIso, backup });
-    finishRun(db, runId, 'ok', new Date().toISOString(), res.paths.md);
-    return res;
+
+    // Committed: record that before anything else can fail.
+    finishRun(db, runId, 'ok', new Date().toISOString(), null);
+    try {
+      const rep = await report(runId, nowIso, 'ok', stats, { mergedAt: nowIso });
+      const paths = writeReport(rep, layout.reports, info.workspace);
+      setRunReportPath(db, runId, paths.md);
+      return result('ok', rep, paths, backup);
+    } catch (err) {
+      throw new Error(`merge committed (run ${runId}); report could not be written: ${errMessage(err)}; run review-report after fixing`);
+    }
   } finally {
     db.close();
   }
+}
+
+/** `now` as ISO-8601, moved 1 ms past the latest earlier run's started_at when needed. */
+function uniqueRunTime(db: DatabaseSync, now: Date): string {
+  const row = db.prepare('SELECT MAX(started_at) AS m FROM runs').get() as { m: string | null } | undefined;
+  const last = row?.m ? Date.parse(row.m) : Number.NaN;
+  const t = Number.isNaN(last) || now.getTime() > last ? now.getTime() : last + 1;
+  return new Date(t).toISOString();
 }
 
 /** Priority order a merge would use, read from the database without writing to it. */

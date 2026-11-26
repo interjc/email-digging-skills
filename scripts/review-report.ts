@@ -9,15 +9,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stringify as stringifyYaml } from 'yaml';
-import type { ResolvedEncoding } from './lib/types.ts';
+import type { ResolvedEncoding, SourceMeta, SourceStageResult } from './lib/types.ts';
 import { EXIT } from './lib/types.ts';
 import { parseCliArgs, printWarnings, runCli } from './lib/cli.ts';
 import { PreconditionError } from './lib/errors.ts';
 import { repoRoot, requireWorkspace } from './lib/paths.ts';
+import type { WorkspaceInfo } from './lib/paths.ts';
+import { loadMeta } from './lib/meta.ts';
+import { withWorkspaceLock } from './lib/lock.ts';
 import { openDb } from './lib/db.ts';
 import { loadOverrides } from './lib/overrides.ts';
 import { normalizeOverrideEmail } from './lib/merge.ts';
-import { lowConfidenceMappings } from './lib/report.ts';
+import { autoEncodings, lowConfidenceMappings, writeFileAtomic } from './lib/report.ts';
 import type { FullRunReport } from './lib/report.ts';
 import { maskEmail } from './lib/mask.ts';
 import { sanitizeText } from './lib/sanitize.ts';
@@ -52,9 +55,42 @@ export interface ReviewResult {
   workspace_warnings: string[];
 }
 
-export function reviewReport(opts: { workspace?: string | null; repoRoot?: string } = {}): ReviewResult {
+/**
+ * Stage results with their exact (unsanitized) values: `output/staging/<source>/stats.json` written by
+ * the same clean-and-merge run as the report. Falls back to the (sanitized) report entry when the file
+ * is missing or unreadable.
+ */
+function exactStage(stagingDir: string, fromReport: SourceStageResult[]): SourceStageResult[] {
+  return fromReport.map((s) => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(stagingDir, s.source, 'stats.json'), 'utf8')) as SourceStageResult;
+      return parsed.source === s.source && Array.isArray(parsed.files) ? parsed : s;
+    } catch {
+      return s;
+    }
+  });
+}
+
+function loadMetas(resources: string, names: string[]): SourceMeta[] {
+  const out: SourceMeta[] = [];
+  for (const n of names) {
+    try {
+      out.push(loadMeta(path.join(resources, n)));
+    } catch {
+      // an invalid meta.md is reported by clean-and-merge; candidates fall back to the encoding used
+    }
+  }
+  return out;
+}
+
+export async function reviewReport(opts: { workspace?: string | null; repoRoot?: string } = {}): Promise<ReviewResult> {
   const root = opts.repoRoot ?? repoRoot();
   const info = requireWorkspace({ workspace: opts.workspace, repoRoot: root });
+  // Hold the workspace lock so the report, staging stats and database cannot change mid-review.
+  return withWorkspaceLock(info.workspace, 'review-report', () => reviewLocked(info));
+}
+
+function reviewLocked(info: WorkspaceInfo): ReviewResult {
   const { layout } = info;
   const latest = path.join(layout.reports, 'latest.json');
   if (!fs.existsSync(latest)) {
@@ -63,6 +99,7 @@ export function reviewReport(opts: { workspace?: string | null; repoRoot?: strin
   const report = JSON.parse(fs.readFileSync(latest, 'utf8')) as FullRunReport;
   const overrides = loadOverrides(layout.overrides);
   const decided = new Set(overrides.typo.map((t) => normalizeOverrideEmail(t.email)));
+  const stage = exactStage(layout.staging, report.stage ?? []);
 
   const db = openDb(layout.dbPath, { readonly: true });
   let typo: PendingDecisions['typo_decisions'];
@@ -77,9 +114,11 @@ export function reviewReport(opts: { workspace?: string | null; repoRoot?: strin
         sources: (sourcesOf.all(c.id) as Array<{ source: string }>).map((r) => r.source),
       }));
     unknownBasis = (db.prepare("SELECT name FROM sources WHERE consent_basis = 'unknown' ORDER BY priority, name").all() as Array<{ name: string }>).map((r) => r.name);
-    orphaned = report.merged_at === null || report.merged_at === undefined
+    // Orphans of this run: orphaned_at equals the run's own (unique, millisecond) timestamp.
+    const run = db.prepare("SELECT started_at FROM runs WHERE id = ? AND command = 'clean-and-merge' AND status = 'ok'").get(report.run_id) as { started_at: string } | undefined;
+    orphaned = run === undefined
       ? []
-      : (db.prepare('SELECT email, orphaned_at FROM contacts WHERE orphaned_at = ? ORDER BY email').all(report.merged_at) as Array<{ email: string; orphaned_at: string }>)
+      : (db.prepare('SELECT email, orphaned_at FROM contacts WHERE orphaned_at = ? ORDER BY email').all(run.started_at) as Array<{ email: string; orphaned_at: string }>)
         .map((r) => ({ email: r.email, orphaned_at: r.orphaned_at }));
   } finally {
     db.close();
@@ -92,15 +131,17 @@ export function reviewReport(opts: { workspace?: string | null; repoRoot?: strin
     .sort();
 
   const warnings = report.warnings ?? [];
+  const metas = loadMetas(layout.resources, stage.map((s) => s.source));
   const pending: PendingDecisions = {
     run_id: report.run_id,
     generated_at: new Date().toISOString(),
     typo_decisions: typo,
-    // D25: plain UTF-8 detected with a single candidate is reported but not asked about.
-    encodings: (report.samples?.auto_encodings ?? [])
+    // Every detected file (not the capped report samples). D25: plain UTF-8 detected with a single
+    // candidate is reported but not asked about.
+    encodings: autoEncodings(stage, metas)
       .filter((e) => e.encoding !== 'utf-8' || e.candidates.length > 1)
       .map((e) => ({ source: e.source, file: e.file, detected: e.encoding, candidates: e.candidates })),
-    low_confidence_mappings: lowConfidenceMappings(report.stage ?? []).map((x) => ({
+    low_confidence_mappings: lowConfidenceMappings(stage).map((x) => ({
       source: x.source, file: x.file, field: x.mapping.field, column: x.mapping.column, how: x.mapping.how, confidence: x.mapping.confidence,
     })),
     sources_without_meta: withoutMeta,
@@ -110,8 +151,7 @@ export function reviewReport(opts: { workspace?: string | null; repoRoot?: strin
     other_warnings: warnings.filter((w) => !OVERRIDE_FILE.test(w)),
   };
 
-  const pendingPath = path.join(layout.reports, PENDING_FILE);
-  fs.writeFileSync(pendingPath, renderPendingYaml(pending));
+  const pendingPath = writeFileAtomic(layout.reports, PENDING_FILE, renderPendingYaml(pending), info.workspace);
   return { pending, pending_path: pendingPath, report_status: report.status ?? 'unknown', workspace_warnings: info.warnings };
 }
 
@@ -164,7 +204,7 @@ async function main(): Promise<number> {
   const { values } = parseCliArgs(process.argv.slice(2));
   let result: ReviewResult;
   try {
-    result = reviewReport({ workspace: values.workspace as string | undefined });
+    result = await reviewReport({ workspace: values.workspace as string | undefined });
   } catch (err) {
     if (err instanceof PreconditionError) throw new PreconditionError(sanitizeText(err.message), err.fix === null ? null : sanitizeText(err.fix));
     throw new Error(sanitizeText(err instanceof Error ? err.message : String(err)));

@@ -10,7 +10,7 @@ import { loadOverrides } from './overrides.ts';
 import { stageSource } from './stage.ts';
 import { layoutDirs, workspaceLayout } from './paths.ts';
 import { mergeStaged, startRun } from './merge.ts';
-import { autoEncodings, buildReport, renderMarkdown, SAMPLE_LIMIT, writeReport } from './report.ts';
+import { autoEncodings, buildReport, renderMarkdown, SAMPLE_LIMIT, writeFileAtomic, writeReport } from './report.ts';
 import { SJIS, writeFile } from './read/testutil.ts';
 
 const repo = path.resolve(import.meta.dirname, '..', '..');
@@ -22,7 +22,7 @@ const CONFIG: PipelineConfig = {
 
 /** Address-like substrings that are not masked (masked forms contain `*`). */
 function unmaskedAddresses(text: string): string[] {
-  const re = /[^\s@＠<>"'`()[\]{}:,;|]+[@＠][^\s@＠<>"'`()[\]{}:,;|]+/gu;
+  const re = /[^\s@＠﹫<>"'`()[\]{}:,;|]+[@＠﹫][^\s@＠﹫<>"'`()[\]{}:,;|]+/gu;
   return (text.match(re) ?? []).filter((m) => !m.includes('*'));
 }
 
@@ -50,7 +50,7 @@ test('report: masked JSON + Markdown with every section, latest copies, sample l
 
   const report = await buildReport(results, merge, {
     runId: 'r1', generatedAt: now, status: 'ok', mergedAt: now, metas,
-    sourcesWithoutMeta: ['new-source'], warnings: ['consents.yaml: no contact taro@example.com in source "x"; override ignored'],
+    sourcesWithoutMeta: ['new-source'], warnings: ['consents.yaml: no contact taro@example.com in source "x"; override ignored', 'header "owner\uFE6Bexample.org" ignored'],
   });
   assert.equal(report.status, 'ok');
   assert.equal(report.merge?.contacts_total, merge.contacts_total);
@@ -62,9 +62,11 @@ test('report: masked JSON + Markdown with every section, latest copies, sample l
   assert.ok(report.samples.typo.length >= 1);
   assert.ok(report.samples.typo.some((t) => t.masked === 'y***@e***e.con' && t.masked_suggestion === 'y***@e***e.com'));
   // warnings are sanitized even when the caller passes a full address
-  assert.deepEqual(report.warnings, ['consents.yaml: no contact t***@e***e.com in source "x"; override ignored']);
+  // ... also with the compatibility form U+FE6B of @
+  assert.equal(report.warnings[0], 'consents.yaml: no contact t***@e***e.com in source "x"; override ignored');
+  assert.equal(report.warnings[1], 'header "o***@e***e.org" ignored');
 
-  const paths = writeReport(report, layout.reports);
+  const paths = writeReport(report, layout.reports, layout.workspace);
   assert.equal(paths.json, path.join(layout.reports, 'r1.json'));
   assert.equal(fs.readFileSync(path.join(layout.reports, 'latest.json'), 'utf8'), fs.readFileSync(paths.json, 'utf8'));
   assert.equal(fs.readFileSync(path.join(layout.reports, 'latest.md'), 'utf8'), fs.readFileSync(paths.md, 'utf8'));
@@ -118,4 +120,33 @@ test('report: auto-detected encodings list every candidate; headers and errors a
   assert.ok(md.includes('b***@e***e.org'));
   assert.deepEqual(unmaskedAddresses(md), []);
   assert.deepEqual(unmaskedAddresses(JSON.stringify(report)), []);
+});
+
+test('report files stay inside the workspace: symlinked targets are replaced, an outside reports dir is refused', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 't7-wr-'));
+  const ws = path.join(base, 'ws');
+  const reports = path.join(ws, 'output', 'reports');
+  fs.mkdirSync(reports, { recursive: true });
+  const outside = path.join(base, 'outside.md');
+  fs.writeFileSync(outside, 'keep me');
+  fs.symlinkSync(outside, path.join(reports, 'latest.md'));
+
+  const report = { run_id: 'r9', generated_at: 'now', status: 'dry-run', dry_run: true, merged_at: null, stage: [], merge: null, priority_order: [],
+    sources_without_meta: [], staged_totals: { unique_emails: 0, cross_source_dups: 0, rejected_rows: 0 },
+    samples: { invalid: [], typo: [], low_confidence_mappings: [], auto_encodings: [] }, warnings: [], errors: [] } as const;
+  writeReport(structuredClone(report) as never, reports, ws);
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'keep me', 'the symlink target is untouched');
+  assert.ok(fs.lstatSync(path.join(reports, 'latest.md')).isFile());
+  assert.equal((fs.statSync(path.join(reports, 'r9.json')).mode & 0o777), 0o600);
+  assert.deepEqual(fs.readdirSync(reports).filter((f) => f.endsWith('.tmp')), []);
+
+  // reports directory that resolves outside the workspace
+  const elsewhere = path.join(base, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  const ws2 = path.join(base, 'ws2');
+  fs.mkdirSync(path.join(ws2, 'output'), { recursive: true });
+  fs.symlinkSync(elsewhere, path.join(ws2, 'output', 'reports'));
+  assert.throws(() => writeReport(structuredClone(report) as never, path.join(ws2, 'output', 'reports'), ws2), /outside the workspace/);
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+  assert.throws(() => writeFileAtomic(reports, '../x', 'y', ws), /invalid file name/);
 });
