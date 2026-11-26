@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync, SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite';
 import { backupStamp } from './db.ts';
-import { maskEmail, maskValue } from './mask.ts';
+import { maskEmail, maskName, maskValue } from './mask.ts';
 import { sanitizeText } from './sanitize.ts';
 import type { ProviderList } from './types.ts';
 
@@ -22,6 +22,8 @@ interface Query {
   sql: string;
   args?: SQLInputValue[];
   countSql?: string;
+  /** Output columns (by name) a preset declares non-personal although SQLite reports no origin (D33). */
+  safe?: string[];
 }
 
 export function presetQuery(name: string, opts: { source?: string; notIn?: string; list: ProviderList }): Query {
@@ -59,13 +61,13 @@ export function presetQuery(name: string, opts: { source?: string; notIn?: strin
     case 'domains':
       return { sql: `
         SELECT email_domain AS domain, count(*) AS contacts FROM contacts
-        GROUP BY email_domain ORDER BY contacts DESC, email_domain LIMIT 20` };
+        GROUP BY email_domain ORDER BY contacts DESC, email_domain LIMIT 20`, safe: ['domain'] };
     case 'status':
       return { sql: `
         SELECT 'status' AS kind, CAST(email_status AS TEXT) AS value, count(*) AS contacts FROM contacts GROUP BY email_status
         UNION ALL
         SELECT 'flag', f.value, count(DISTINCT c.id) FROM contacts c, json_each(c.flags) f GROUP BY f.value
-        ORDER BY kind DESC, value` };
+        ORDER BY kind DESC, value`, safe: ['kind', 'value'] };
     case 'consent':
       return { sql: `
         WITH statuses(status) AS (VALUES ('granted'), ('denied'), ('unknown'))
@@ -73,7 +75,7 @@ export function presetQuery(name: string, opts: { source?: string; notIn?: strin
         FROM sources s CROSS JOIN statuses t
         LEFT JOIN (contact_sources cs LEFT JOIN consents k USING (contact_id, source))
           ON cs.source = s.name AND coalesce(k.status, 'unknown') = t.status
-        GROUP BY s.name, t.status ORDER BY s.name, t.status` };
+        GROUP BY s.name, t.status ORDER BY s.name, t.status`, safe: ['status'] };
     case 'orphaned':
       return { sql: `SELECT id, email, orphaned_at FROM contacts WHERE orphaned_at IS NOT NULL ORDER BY id` };
     default:
@@ -139,42 +141,107 @@ export function prepareReadOnly(db: DatabaseSync, sql: string): StatementSync {
   return statement;
 }
 
-function redactCell(field: string, value: unknown, origin?: string | null): unknown {
-  const label = (origin ?? field).normalize('NFKC').toLowerCase();
+// D33: masking is fail-closed. A text value passes (address-sanitized only) when SQLite traces its output
+// column to a column known to hold no personal data, or a preset declares the column safe. Known personal
+// columns get their field mask; everything else (computed expressions, unknown columns, JSON payloads)
+// is masked as free text. Numbers and NULL pass.
+const SAFE_COLUMNS = new Set([
+  'schema_migrations.version', 'schema_migrations.applied_at',
+  'sources.name', 'sources.kind', 'sources.label', 'sources.consent_basis', 'sources.counts_as_opt_in',
+  'sources.priority', 'sources.exported_at', 'sources.updated_at',
+  'contacts.id', 'contacts.locale', 'contacts.email_status', 'contacts.flags', 'contacts.first_seen_at',
+  'contacts.orphaned_at', 'contacts.created_at', 'contacts.updated_at',
+  'contact_sources.contact_id', 'contact_sources.source', 'contact_sources.first_seen_at',
+  'contact_sources.last_seen_at', 'contact_sources.occurrences', 'contact_sources.files',
+  'consents.contact_id', 'consents.source', 'consents.status', 'consents.recorded_at',
+  'suppressions.id', 'suppressions.reason', 'suppressions.source', 'suppressions.created_at',
+  'runs.id', 'runs.command', 'runs.started_at', 'runs.finished_at', 'runs.status', 'runs.report_path',
+  'rejected_rows.id', 'rejected_rows.run_id', 'rejected_rows.source', 'rejected_rows.file',
+  'rejected_rows.row_number', 'rejected_rows.reason',
+  'imports.id', 'imports.run_id', 'imports.source', 'imports.file', 'imports.sha256', 'imports.encoding',
+  'imports.rows_read', 'imports.imported_at',
+  'sync_log.id', 'sync_log.provider', 'sync_log.direction', 'sync_log.dry_run', 'sync_log.started_at',
+  'sync_log.finished_at', 'sync_log.counts', 'sync_log.status',
+]);
+const EMAIL_COLUMNS = new Set(['contacts.email', 'contacts.suggested_email', 'contact_sources.raw_email', 'suppressions.email']);
+const NAME_COLUMNS = new Set(['contacts.name']);
+const JSON_COLUMNS = new Set(['contact_sources.raw_fields', 'consents.evidence']);
+/** JSON columns without personal data (flag names, file names, counts): parsed, strings address-sanitized. */
+const SAFE_JSON_COLUMNS = new Set(['contacts.flags', 'contact_sources.files', 'sync_log.counts']);
+const REDACTED_COLUMNS = new Set(['suppressions.note', 'rejected_rows.raw_value']);
+
+export interface ColumnOrigin { table: string | null; column: string | null }
+
+/** Free text of unknown meaning: addresses masked, then only the first character kept. */
+export function maskFreeText(value: string): string {
+  const sanitized = sanitizeText(value);
+  if (sanitized !== value) return sanitized;
+  return maskName(value) || '***';
+}
+
+/** A leaf inside a JSON payload, labelled by its key (or the column named next to it). */
+function redactLeaf(label: string, value: unknown): unknown {
+  if (value === null || value === undefined || typeof value === 'number' || typeof value === 'boolean') return value;
+  const text = String(value);
+  const masked = maskValue(label, sanitizeText(text));
+  if (masked !== sanitizeText(text)) return sanitizeText(masked);
+  return maskFreeText(text);
+}
+
+function redactJson(value: unknown, label = ''): unknown {
+  if (Array.isArray(value)) return value.map((v: unknown) => redactJson(v, label));
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(row).map(([key, cell]) => {
+      // consents.evidence: {"column","file","row_number","value"}; column and file name the source, not the person.
+      if ((key === 'column' || key === 'file') && typeof cell === 'string') return [sanitizeText(key), sanitizeText(cell)];
+      const inner = key === 'value' && typeof row.column === 'string' ? row.column : key;
+      return [sanitizeText(key), redactJson(cell, inner)];
+    }));
+  }
+  return redactLeaf(label, value);
+}
+
+function sanitizeParsed(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizeText(value);
+  if (Array.isArray(value)) return value.map(sanitizeParsed);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [sanitizeText(k), sanitizeParsed(v)]));
+  }
+  return value;
+}
+
+export function redactCell(field: string, value: unknown, origin: ColumnOrigin | null = null, safe: ReadonlySet<string> = new Set()): unknown {
   if (value instanceof Uint8Array) return `<blob len=${value.length}>`;
   if (value === null || value === undefined) return value;
-  if (['raw_fields', 'flags', 'evidence'].includes(label)) {
+  if (typeof value === 'bigint') return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
+  if (typeof value === 'number') return value;
+  const text = String(value);
+  const key = origin?.table && origin.column ? `${origin.table}.${origin.column}` : null;
+
+  if (key && REDACTED_COLUMNS.has(key)) return '<redacted>';
+  if (key && JSON_COLUMNS.has(key)) {
     try {
-      return redactJson(JSON.parse(String(value)) as unknown);
+      return redactJson(JSON.parse(text) as unknown);
     } catch {
       return '<invalid JSON redacted>';
     }
   }
-  if (['raw_value', 'note'].includes(label)) return '<redacted>';
-  if (label === 'email_status' && ['valid', 'role', 'typo_suspect'].includes(String(value))) return value;
-  if (label === 'email_domain' && field === 'domain') return sanitizeText(String(value)); // Domain distribution preset.
-  if (label === 'email_domain' && typeof value === 'string' && !value.includes('@')) {
-    return sanitizeText(maskEmail(`x@${value}`).split('@').at(-1) ?? '***');
+  if (key && SAFE_JSON_COLUMNS.has(key)) {
+    try {
+      return sanitizeParsed(JSON.parse(text) as unknown);
+    } catch {
+      return '<invalid JSON redacted>';
+    }
   }
-  const text = typeof value === 'bigint' && Number.isSafeInteger(Number(value)) ? Number(value)
-    : typeof value === 'bigint' ? value.toString() : value;
-  // Address detection first, so a phone field containing an email cannot preserve its local part.
-  const safe = sanitizeText(String(text));
-  const originalMask = maskValue(label, safe);
-  const masked = originalMask === safe && field !== label ? maskValue(field, safe) : originalMask;
-  return masked === String(text) ? text : sanitizeText(masked);
-}
-
-function redactJson(value: unknown, field = ''): unknown {
-  if (Array.isArray(value)) return value.map((v: unknown) => redactJson(v, field));
-  if (value && typeof value === 'object') {
-    const row = value as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(row).map(([key, cell]) => {
-      const label = key === 'value' && typeof row.column === 'string' ? row.column : key;
-      return [sanitizeText(key), redactJson(cell, label)];
-    }));
+  if (key && EMAIL_COLUMNS.has(key)) return sanitizeText(maskEmail(text));
+  if (key && NAME_COLUMNS.has(key)) return maskFreeText(text);
+  if (key === 'contacts.email_domain') {
+    if (safe.has(field)) return sanitizeText(text); // domain distribution preset
+    return sanitizeText(maskEmail(`x@${text}`).split('@').at(-1) ?? '***');
   }
-  return redactCell(field, value);
+  if ((key && SAFE_COLUMNS.has(key)) || safe.has(field)) return sanitizeText(text);
+  return maskFreeText(text);
 }
 
 type EmitRow = (values: readonly SQLOutputValue[]) => void;
@@ -246,6 +313,7 @@ export function executeQuery(
     return { export_file, row_count };
   }
 
+  const safe = new Set(query.safe ?? []);
   const namesUsed = new Set<string>();
   const headers = names.map((name) => {
     const safe = sanitizeText(name);
@@ -256,7 +324,8 @@ export function executeQuery(
   });
   const rows: Record<string, unknown>[] = [];
   for (const row of stmt.iterate(...args)) {
-    rows.push(Object.fromEntries(columns.map((col, i) => [headers[i]!, redactCell(col.name, row[col.name], col.column)])));
+    rows.push(Object.fromEntries(columns.map((col, i) =>
+      [headers[i]!, redactCell(col.name, row[col.name], { table: col.table, column: col.column }, safe)])));
     if (rows.length >= limit) break;
   }
   return query.countSql ? { rows, count: Number(db.prepare(query.countSql).get()?.count) } : { rows };

@@ -88,3 +88,46 @@ test('presets report known source membership, overlap, list, domain, status and 
     db.close();
   }
 });
+
+test('R5-1 (D33): masking is fail-closed: computed columns and consent evidence never return a full name', () => {
+  const db = openDb(':memory:');
+  try {
+    migrate(db, migrations);
+    db.exec(`
+      INSERT INTO sources (name, kind, priority, updated_at) VALUES ('a', 'product', 1, '2026');
+      INSERT INTO contacts (id, email, email_domain, name, email_status, created_at, updated_at) VALUES
+        (1, 'taro@example.jp', 'example.jp', 'Taro Yamada', 'valid', '2026-01-02', '2026-01-02');
+      INSERT INTO contact_sources (contact_id, source, raw_email, raw_fields) VALUES
+        (1, 'a', 'taro@example.jp', '{"Newsletter":"Taro Yamada","Memo":"call Hanako Sato"}');
+      INSERT INTO consents (contact_id, source, status, evidence) VALUES
+        (1, 'a', 'granted', '{"column":"Newsletter","value":"Taro Yamada","file":"a.csv","row_number":3}');
+    `);
+    const rows = (sql: string) => {
+      const r = executeQuery(db, { sql }, 50);
+      assert.ok('rows' in r);
+      return r.rows;
+    };
+    const leaks = (value: unknown) => /Taro Yamada|Yamada|Hanako|taro@/.test(JSON.stringify(value));
+    for (const sql of [
+      'SELECT max(name) AS m FROM contacts',
+      'SELECT group_concat(name) AS g FROM contacts',
+      "SELECT coalesce(name, '') AS n FROM contacts",
+      'SELECT upper(name) AS who FROM contacts',
+      "SELECT name || '' AS x FROM contacts",
+      'SELECT (SELECT name FROM contacts) AS sub',
+      'SELECT evidence FROM consents',
+      "SELECT json_extract(evidence, '$.value') AS v FROM consents",
+      'SELECT raw_fields FROM contact_sources',
+      "SELECT json_extract(raw_fields, '$.Memo') AS memo FROM contact_sources",
+      'SELECT email, name, suggested_email FROM contacts',
+    ]) assert.equal(leaks(rows(sql)), false, sql);
+    // Known non-personal columns still read normally.
+    assert.deepEqual(rows('SELECT id, email_status, created_at, flags FROM contacts'),
+      [{ id: 1, email_status: 'valid', created_at: '2026-01-02', flags: [] }]);
+    assert.deepEqual(rows('SELECT source, status FROM consents'), [{ source: 'a', status: 'granted' }]);
+    const ev = rows('SELECT evidence FROM consents')[0]?.evidence as Record<string, unknown>;
+    assert.deepEqual({ column: ev.column, file: ev.file, row_number: ev.row_number }, { column: 'Newsletter', file: 'a.csv', row_number: 3 });
+  } finally {
+    db.close();
+  }
+});
